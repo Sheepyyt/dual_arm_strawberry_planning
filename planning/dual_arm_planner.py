@@ -1436,6 +1436,386 @@ class BaselinePlanner(DualArmPlannerCore):
 
 
 # ===========================================================================
+# RealCostPlanner：真实代价规划器
+# 包含：从 URDF 读取基座位置、加载 dual_arm_cost.pkl、
+#       从网格点采样任务、real-cost 贪心启发式、real-cost 绘图钩子
+# ===========================================================================
+
+class RealCostPlanner(DualArmPlannerCore):
+    """
+    真实代价规划器。
+
+    继承 DualArmPlannerCore，接入 ``dual_arm_cost.pkl`` 的真实可达性与代价数据：
+
+      - 从 URDF 文件解析左右臂基座位置（vehicle frame）
+      - 加载 ``dual_arm_cost.pkl`` 中的 ``left_cost_table`` / ``right_cost_table``
+      - 直接从 cost table 网格点采样任务（不做插值）
+      - 生成 task_df，字段包含 region、x、y、z、table_key、
+        accessible_by、is_interference、time_to_L、time_to_R
+      - 提供简单贪心启发式（greedy heuristic）
+      - 提供采样窗口背景绘图与按可达性着色
+
+    干涉区定义：双臂都可达 → ``is_interference = True``。
+    ``region`` 字段等于采样窗口名称，MILP 核心类通过 ``region`` 字段
+    对干涉任务分组并施加串行约束（与 baseline 逻辑一致，无需修改 core）。
+
+    采样窗口仅用于分组 / 采样 / 可视化，不人为定义干涉区，
+    干涉标签完全由 cost table 真值决定。
+    """
+
+    # 默认采样窗口（与 dual_arm_cost.pkl 扫描范围匹配）
+    # x 以 -0.15 为分界线，y 正负分左右侧果实带
+    _DEFAULT_WINDOWS: List[Dict] = [
+        {"name": "W_left_back",   "x_min": -0.65, "x_max": -0.15, "y_min":  0.30, "y_max":  0.60},
+        {"name": "W_left_front",  "x_min": -0.15, "x_max":  0.30, "y_min":  0.30, "y_max":  0.60},
+        {"name": "W_right_back",  "x_min": -0.65, "x_max": -0.15, "y_min": -0.60, "y_max": -0.30},
+        {"name": "W_right_front", "x_min": -0.15, "x_max":  0.30, "y_min": -0.60, "y_max": -0.30},
+    ]
+
+    # 窗口背景填充色（顺序与 _DEFAULT_WINDOWS 对应）
+    _WINDOW_FACECOLORS: List[str] = ["lightblue", "lightyellow", "lightsalmon", "lightgreen"]
+
+    # 任务点配色（按可达性区分）
+    _ACCESSIBILITY_COLORS: Dict[str, str] = {
+        "left_only":  "steelblue",
+        "right_only": "tomato",
+        "both":       "darkorange",
+    }
+
+    def __init__(self,
+                 urdf_path: str,
+                 cost_pkl_path: str,
+                 windows_config: Optional[List[Dict]] = None,
+                 base_operation_time: float = 0.0):
+        """
+        参数:
+            urdf_path: dual_arm_ik.urdf 文件路径（解析基座位置）
+            cost_pkl_path: dual_arm_cost.pkl 文件路径
+            windows_config: 采样窗口配置列表；None 则使用默认 4 窗口
+            base_operation_time: 单草莓固定处理时间（采摘 + 放置，单位 s）
+        """
+        # 1. 从 URDF 解析左右臂基座 (x, y)
+        L_xyz, R_xyz = self._load_base_xyz_from_urdf(urdf_path)
+        L_base_2d = np.array([L_xyz[0], L_xyz[1]])
+        R_base_2d = np.array([R_xyz[0], R_xyz[1]])
+
+        super().__init__(L_base=L_base_2d, R_base=R_base_2d,
+                         base_operation_time=base_operation_time)
+
+        # 2. 加载 cost table
+        self.cost_pkl_path = cost_pkl_path
+        self._load_cost_tables(cost_pkl_path)
+
+        # 3. 采样窗口
+        self.windows = self._DEFAULT_WINDOWS if windows_config is None else windows_config
+
+    # ----------------------------------------------------------------------- #
+    # URDF 解析                                                                #
+    # ----------------------------------------------------------------------- #
+
+    @staticmethod
+    def _load_base_xyz_from_urdf(urdf_path: str) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        从 URDF 解析左右臂基座在 vehicle frame 下的 xyz 位置。
+
+        读取 ``vehicle_to_left_arm`` 和 ``vehicle_to_right_arm`` 固定关节的
+        ``origin xyz`` 属性。
+        """
+        import xml.etree.ElementTree as ET
+
+        tree = ET.parse(urdf_path)
+        root = tree.getroot()
+
+        def _get_origin_xyz(joint_name: str) -> np.ndarray:
+            joint = root.find(f"./joint[@name='{joint_name}']")
+            if joint is None:
+                raise ValueError(f"Joint '{joint_name}' not found in {urdf_path}")
+            origin = joint.find("origin")
+            if origin is None:
+                return np.zeros(3)
+            xyz = [float(v) for v in origin.attrib.get("xyz", "0 0 0").split()]
+            return np.array(xyz)
+
+        L_xyz = _get_origin_xyz("vehicle_to_left_arm")
+        R_xyz = _get_origin_xyz("vehicle_to_right_arm")
+        return L_xyz, R_xyz
+
+    # ----------------------------------------------------------------------- #
+    # Cost table 加载                                                          #
+    # ----------------------------------------------------------------------- #
+
+    def _load_cost_tables(self, cost_pkl_path: str) -> None:
+        """加载 dual_arm_cost.pkl，提取 left_cost_table 和 right_cost_table。"""
+        import pickle
+
+        with open(cost_pkl_path, "rb") as f:
+            data = pickle.load(f)
+
+        self.left_cost_table: Dict[str, float] = data["left_cost_table"]
+        self.right_cost_table: Dict[str, float] = data["right_cost_table"]
+
+        print(f"Loaded cost table: {len(self.left_cost_table)} left-reachable, "
+              f"{len(self.right_cost_table)} right-reachable grid points.")
+
+    # ----------------------------------------------------------------------- #
+    # RealCost 任务采样                                                        #
+    # ----------------------------------------------------------------------- #
+
+    def sample_tasks_from_cost_table(
+            self,
+            n_per_window: Union[int, Dict[str, int]] = 5,
+            seed: Optional[int] = None) -> pd.DataFrame:
+        """
+        从 cost table 网格点中采样任务（直接使用网格点，不做插值）。
+
+        参数:
+            n_per_window: 每个窗口的采样数量。
+                - ``int``：所有窗口均采用相同数量
+                - ``Dict[str, int]``：每个窗口独立指定，如
+                  ``{"W_left_back": 6, "W_left_front": 4, ...}``
+            seed: 随机种子（None 则不固定）
+
+        返回:
+            task_df，字段：region, x, y, z, table_key,
+                           accessible_by, is_interference, time_to_L, time_to_R
+        """
+        rng = np.random.default_rng(seed)
+
+        all_keys = set(self.left_cost_table.keys()) | set(self.right_cost_table.keys())
+        task_data = []
+
+        for window in self.windows:
+            w_name = window["name"]
+            n = (n_per_window if isinstance(n_per_window, int)
+                 else n_per_window.get(w_name, 5))
+
+            # 筛选落在该窗口内的可达网格点
+            window_keys = [
+                k for k in all_keys
+                if (window["x_min"] <= float(k.split("_")[0]) <= window["x_max"] and
+                    window["y_min"] <= float(k.split("_")[1]) <= window["y_max"])
+            ]
+
+            if not window_keys:
+                print(f"  Warning: No reachable points in window '{w_name}', skipping.")
+                continue
+
+            n_actual = min(n, len(window_keys))
+            sampled_keys = [
+                str(k) for k in rng.choice(window_keys, size=n_actual, replace=False)
+            ]
+
+            for key in sampled_keys:
+                parts = key.split("_")
+                x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+
+                l_cost = self.left_cost_table.get(key)
+                r_cost = self.right_cost_table.get(key)
+
+                accessible_by: List[str] = []
+                if l_cost is not None:
+                    accessible_by.append("L")
+                if r_cost is not None:
+                    accessible_by.append("R")
+
+                if not accessible_by:
+                    continue  # both_unreachable，跳过
+
+                is_interference = (l_cost is not None and r_cost is not None)
+                time_L = (2.0 * float(l_cost) + self.base_operation_time) if l_cost is not None else None
+                time_R = (2.0 * float(r_cost) + self.base_operation_time) if r_cost is not None else None
+
+                task_data.append({
+                    "region":          w_name,
+                    "x":               x,
+                    "y":               y,
+                    "z":               z,
+                    "table_key":       key,
+                    "accessible_by":   accessible_by,
+                    "is_interference": is_interference,
+                    "time_to_L":       time_L,
+                    "time_to_R":       time_R,
+                })
+
+        if not task_data:
+            raise RuntimeError("No tasks sampled. Check windows_config and cost table coverage.")
+
+        self.task_df = pd.DataFrame(task_data).reset_index(drop=True)
+        self._extract_milp_parameters()
+
+        print(f"Sampled {len(self.task_df)} tasks across {len(self.windows)} windows:")
+        for window in self.windows:
+            wn = window["name"]
+            n_w = int((self.task_df["region"] == wn).sum())
+            n_int = int(
+                ((self.task_df["region"] == wn) & self.task_df["is_interference"]).sum()
+            )
+            print(f"  {wn}: {n_w} tasks ({n_int} interference, {n_w - n_int} single-arm)")
+
+        return self.task_df
+
+    # ----------------------------------------------------------------------- #
+    # RealCost 启发式                                                          #
+    # ----------------------------------------------------------------------- #
+
+    def spatial_order_heuristic(self) -> List[Dict]:
+        """
+        Real-cost 模式的简单贪心调度启发式。
+
+        调度策略（三步顺序）：
+          1. Left-only 任务：按 time_to_L 升序，依次排入左臂队列。
+          2. Right-only 任务：按 time_to_R 升序，依次排入右臂队列
+             （与第 1 步并行，两臂各自独立从 t=0 开始）。
+          3. Both-reachable（干涉）任务：按 min(time_to_L, time_to_R) 升序，
+             为每个任务选择能最早完成的手臂，同时遵守同窗口干涉任务串行约束。
+        """
+        if self.task_df is None:
+            raise ValueError("No task data loaded. Call sample_tasks_from_cost_table() first.")
+
+        actions: List[Dict] = []
+        arm_free: Dict[str, float] = {"L": 0.0, "R": 0.0}
+
+        # 每个窗口的最早可用时间（确保同窗口干涉任务串行）
+        window_free: Dict[str, float] = {w["name"]: 0.0 for w in self.windows}
+
+        # ---- 1) left-only 任务 ------------------------------------------- #
+        left_only = self.task_df[
+            self.task_df["accessible_by"].apply(
+                lambda ab: "L" in ab and "R" not in ab
+            )
+        ].copy().sort_values("time_to_L")
+
+        for idx, row in left_only.iterrows():
+            start = arm_free["L"]
+            end = start + float(row["time_to_L"])
+            arm_free["L"] = end
+            actions.append({
+                "task": f"t{idx}", "arm": "L",
+                "x": row["x"], "y": row["y"],
+                "start": start, "end": end,
+            })
+
+        # ---- 2) right-only 任务 ------------------------------------------ #
+        right_only = self.task_df[
+            self.task_df["accessible_by"].apply(
+                lambda ab: "R" in ab and "L" not in ab
+            )
+        ].copy().sort_values("time_to_R")
+
+        for idx, row in right_only.iterrows():
+            start = arm_free["R"]
+            end = start + float(row["time_to_R"])
+            arm_free["R"] = end
+            actions.append({
+                "task": f"t{idx}", "arm": "R",
+                "x": row["x"], "y": row["y"],
+                "start": start, "end": end,
+            })
+
+        # ---- 3) both-reachable（干涉）任务 --------------------------------- #
+        both = self.task_df[self.task_df["is_interference"]].copy()
+        both["_min_cost"] = both.apply(
+            lambda r: min(
+                float(r["time_to_L"]) if pd.notna(r["time_to_L"]) else float("inf"),
+                float(r["time_to_R"]) if pd.notna(r["time_to_R"]) else float("inf"),
+            ),
+            axis=1,
+        )
+        both = both.sort_values("_min_cost")
+
+        for idx, row in both.iterrows():
+            region = row["region"]
+            t_L = float(row["time_to_L"]) if pd.notna(row["time_to_L"]) else None
+            t_R = float(row["time_to_R"]) if pd.notna(row["time_to_R"]) else None
+            win_t = window_free.get(region, 0.0)
+
+            # 选择能最早完成的手臂
+            end_L = (max(arm_free["L"], win_t) + t_L) if t_L is not None else float("inf")
+            end_R = (max(arm_free["R"], win_t) + t_R) if t_R is not None else float("inf")
+
+            if end_L <= end_R:
+                chosen = "L"
+                start = max(arm_free["L"], win_t)
+                end = end_L
+                arm_free["L"] = end
+            else:
+                chosen = "R"
+                start = max(arm_free["R"], win_t)
+                end = end_R
+                arm_free["R"] = end
+
+            window_free[region] = end
+            actions.append({
+                "task": f"t{idx}", "arm": chosen,
+                "x": row["x"], "y": row["y"],
+                "start": start, "end": end,
+            })
+
+        return sorted(actions, key=lambda a: a["start"])
+
+    # ----------------------------------------------------------------------- #
+    # RealCost 绘图钩子                                                        #
+    # ----------------------------------------------------------------------- #
+
+    def _draw_environment_background(self, ax, with_region_labels: bool = True) -> None:
+        """
+        绘制采样窗口矩形（半透明填充）作为环境背景。
+
+        参数:
+            ax: matplotlib Axes 对象
+            with_region_labels: True 时为窗口矩形添加图例标签。
+        """
+        for i, window in enumerate(self.windows):
+            x0 = window["x_min"]
+            y0 = window["y_min"]
+            w = window["x_max"] - window["x_min"]
+            h = window["y_max"] - window["y_min"]
+            facecolor = self._WINDOW_FACECOLORS[i % len(self._WINDOW_FACECOLORS)]
+            label = window["name"] if with_region_labels else "_nolegend_"
+            ax.add_patch(plt.Rectangle(
+                (x0, y0), w, h,
+                facecolor=facecolor, alpha=0.25,
+                edgecolor="gray", linewidth=1.5,
+                label=label,
+            ))
+
+    def _get_task_color(self, task_id: str) -> str:
+        """
+        根据任务可达性返回绘图颜色：
+        left-only → 蓝（steelblue），right-only → 红（tomato），both → 橙（darkorange）。
+        """
+        row = self.task_df.iloc[int(task_id[1:])]
+        if row["is_interference"]:
+            return self._ACCESSIBILITY_COLORS["both"]
+        if "L" in row["accessible_by"]:
+            return self._ACCESSIBILITY_COLORS["left_only"]
+        return self._ACCESSIBILITY_COLORS["right_only"]
+
+    # ----------------------------------------------------------------------- #
+    # RealCost 配置保存                                                        #
+    # ----------------------------------------------------------------------- #
+
+    def _save_configuration(self, config_dir: str) -> None:
+        """保存 real-cost 模式实验配置（JSON）。"""
+        import json
+
+        config = {
+            "mode": "real_cost",
+            "cost_pkl_path": str(self.cost_pkl_path),
+            "arm_bases": {
+                "left":  self.L_base.tolist(),
+                "right": self.R_base.tolist(),
+            },
+            "windows": self.windows,
+            "total_tasks": len(self.task_df) if self.task_df is not None else 0,
+            "accessibility_colors": self._ACCESSIBILITY_COLORS,
+        }
+
+        with open(os.path.join(config_dir, "experiment_config.json"), "w") as f:
+            json.dump(config, f, indent=2)
+
+
+# ===========================================================================
 # 向后兼容别名
 # DualArmPlanner 指向 BaselinePlanner，确保现有调用代码（如 baseline.py）无需修改
 # ===========================================================================
