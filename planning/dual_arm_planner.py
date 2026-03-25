@@ -74,6 +74,15 @@ class DualArmPlannerCore:
         """返回给定任务的绘图颜色。子类覆盖以实现模式相关的配色规则。"""
         return 'blue'  # 默认颜色
 
+    def _configure_axes(self, ax) -> None:
+        """
+        动画/散点图轴设置后处理钩子（坐标轴朝向统一）。
+
+        子类可覆盖此方法来翻转轴方向，使不同模式的可视化保持一致的
+        "左臂在左、右臂在右"显示惯例。默认不做任何操作（baseline 使用）。
+        """
+        pass  # 子类覆盖
+
     # ----------------------------------------------------------------------- #
     # 核心方法：参数提取                                                       #
     # ----------------------------------------------------------------------- #
@@ -568,6 +577,9 @@ class DualArmPlannerCore:
         ax.grid(True)
         ax.set_title(title)
 
+        # 钩子：坐标轴朝向后处理（子类可翻转 x 轴等）
+        self._configure_axes(ax)
+
         # 初始化任务点（颜色由钩子决定）
         task_points = {}
         task_states = {}
@@ -879,6 +891,9 @@ class DualArmPlannerCore:
         ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax2.grid(True, alpha=0.3)
         ax2.set_aspect('equal')
+
+        # 钩子：坐标轴朝向后处理（子类可翻转 x 轴等）
+        self._configure_axes(ax2)
 
         plt.tight_layout()
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -1704,18 +1719,26 @@ class RealCostPlanner(DualArmPlannerCore):
 
     def spatial_order_heuristic(self) -> List[Dict]:
         """
-        Real-cost 模式的简单贪心调度启发式。
+        Real-cost 模式贪心调度启发式（正确优先级版本）。
 
-        调度策略（三步顺序）：
-          1. Left-only 任务：按 time_to_L 升序，依次排入左臂队列。
-          2. Right-only 任务：按 time_to_R 升序，依次排入右臂队列
-             （与第 1 步并行，两臂各自独立从 t=0 开始）。
-          3. 干涉任务（两种独立干涉区）：按 min(time_to_L, time_to_R) 升序，
-             为每个任务选择能最早完成的手臂。
-             - interference_zone_left（y ≥ 0，车辆左侧）和
-               interference_zone_right（y < 0，车辆右侧）各自独立串行；
-             - 同一干涉区内的任务不得重叠（独立时间戳约束）；
-             - 两个干涉区之间可以并行执行。
+        调度策略（严格优先级）：
+
+        **阶段一（双臂并行）**
+          - 左臂优先处理车辆左侧干涉区（interference_left，y ≥ 0），
+            按欧氏距离从左臂基座由近到远排序；
+          - 右臂优先处理车辆右侧干涉区（interference_right，y < 0），
+            按欧氏距离从右臂基座由近到远排序；
+          - 两个干涉区物理独立，可并行（zone_free 各自独立计时）；
+          - 若某干涉区任务的"首选臂"不可达（cost 为 None），退化为使用对侧臂，
+            并等待该干涉区的 zone_free 时间戳（保证串行约束）。
+
+        **阶段二（双臂并行）**
+          - 左臂处理仅左臂可达区域（left_only），按欧氏距离由近到远；
+          - 右臂处理仅右臂可达区域（right_only），按欧氏距离由近到远；
+          - 单臂区无干涉约束，从各自的 arm_free 时刻立即开始。
+
+        阶段一、二各自内部并行执行（左/右臂各自独立计时），
+        阶段一结束后臂才能开始阶段二（arm_free 已携带了阶段一的完成时刻）。
         """
         if self.task_df is None:
             raise ValueError("No task data loaded. Call sample_tasks_from_cost_table() first.")
@@ -1723,88 +1746,86 @@ class RealCostPlanner(DualArmPlannerCore):
         actions: List[Dict] = []
         arm_free: Dict[str, float] = {"L": 0.0, "R": 0.0}
 
-        # 两个独立干涉区各自的最早可用时间
-        # （同一干涉区内任意两个任务不重叠，两区间可并行）
+        # 两个干涉区各自的最早可用时间（同一干涉区内任意两任务不重叠）
         zone_free: Dict[str, float] = {
             "interference_zone_left":  0.0,
             "interference_zone_right": 0.0,
         }
 
-        # ---- 1) left-only 任务 ------------------------------------------- #
-        left_only = self.task_df[
-            self.task_df["accessible_by"].apply(
-                lambda ab: "L" in ab and "R" not in ab
-            )
-        ].copy().sort_values("time_to_L")
+        def euclidean_dist(base: np.ndarray, row: pd.Series) -> float:
+            return float(np.sqrt((row["x"] - base[0]) ** 2 + (row["y"] - base[1]) ** 2))
 
-        for idx, row in left_only.iterrows():
-            start = arm_free["L"]
-            end = start + float(row["time_to_L"])
-            arm_free["L"] = end
+        def schedule_task(idx: int, row: pd.Series, chosen_arm: str, ig: Optional[str]) -> None:
+            """排入一个任务并更新 arm_free / zone_free。"""
+            t_cost = (float(row["time_to_L"]) if chosen_arm == "L"
+                      else float(row["time_to_R"]))
+            if ig is not None:
+                z_free = zone_free[ig]
+                start = max(arm_free[chosen_arm], z_free)
+            else:
+                start = arm_free[chosen_arm]
+            end = start + t_cost
+            arm_free[chosen_arm] = end
+            if ig is not None:
+                zone_free[ig] = end
             actions.append({
-                "task": f"t{idx}", "arm": "L",
+                "task": f"t{idx}", "arm": chosen_arm,
                 "x": row["x"], "y": row["y"],
                 "start": start, "end": end,
             })
 
-        # ---- 2) right-only 任务 ------------------------------------------ #
-        right_only = self.task_df[
-            self.task_df["accessible_by"].apply(
-                lambda ab: "R" in ab and "L" not in ab
-            )
-        ].copy().sort_values("time_to_R")
+        # ------------------------------------------------------------------ #
+        # 阶段一 A：左臂处理 interference_left（y ≥ 0），按距离左臂基座升序  #
+        # ------------------------------------------------------------------ #
+        int_left = self.task_df[self.task_df["region"] == "interference_left"].copy()
+        int_left["_dist"] = int_left.apply(lambda r: euclidean_dist(self.L_base, r), axis=1)
+        int_left = int_left.sort_values("_dist")
 
-        for idx, row in right_only.iterrows():
-            start = arm_free["R"]
-            end = start + float(row["time_to_R"])
-            arm_free["R"] = end
-            actions.append({
-                "task": f"t{idx}", "arm": "R",
-                "x": row["x"], "y": row["y"],
-                "start": start, "end": end,
-            })
-
-        # ---- 3) 干涉任务：两独立区各自串行 --------------------------------- #
-        both = self.task_df[self.task_df["is_interference"]].copy()
-        both["_min_cost"] = both.apply(
-            lambda r: min(
-                float(r["time_to_L"]) if pd.notna(r["time_to_L"]) else float("inf"),
-                float(r["time_to_R"]) if pd.notna(r["time_to_R"]) else float("inf"),
-            ),
-            axis=1,
-        )
-        both = both.sort_values("_min_cost")
-
-        for idx, row in both.iterrows():
+        for idx, row in int_left.iterrows():
             t_L = float(row["time_to_L"]) if pd.notna(row["time_to_L"]) else None
             t_R = float(row["time_to_R"]) if pd.notna(row["time_to_R"]) else None
-
-            # 该任务所属的干涉区（决定使用哪个独立时间戳）
-            ig = str(row["interference_group"])
-            z_free = zone_free.get(ig, 0.0)
-
-            # 每个干涉任务必须等到：该手臂空闲 AND 所属干涉区空闲
-            end_L = (max(arm_free["L"], z_free) + t_L) if t_L is not None else float("inf")
-            end_R = (max(arm_free["R"], z_free) + t_R) if t_R is not None else float("inf")
-
-            if end_L <= end_R:
-                chosen = "L"
-                start = max(arm_free["L"], z_free)
-                end = end_L
-                arm_free["L"] = end
+            if t_L is not None:
+                schedule_task(idx, row, "L", "interference_zone_left")
             else:
-                chosen = "R"
-                start = max(arm_free["R"], z_free)
-                end = end_R
-                arm_free["R"] = end
+                # 退化：左臂不可达，改用右臂（仍须遵守该区域串行约束）
+                schedule_task(idx, row, "R", "interference_zone_left")
 
-            # 仅更新所属干涉区的时间戳（不影响另一个干涉区）
-            zone_free[ig] = end
-            actions.append({
-                "task": f"t{idx}", "arm": chosen,
-                "x": row["x"], "y": row["y"],
-                "start": start, "end": end,
-            })
+        # ------------------------------------------------------------------ #
+        # 阶段一 B：右臂处理 interference_right（y < 0），按距离右臂基座升序  #
+        # （与阶段一 A 并行，两区时间戳独立）                                  #
+        # ------------------------------------------------------------------ #
+        int_right = self.task_df[self.task_df["region"] == "interference_right"].copy()
+        int_right["_dist"] = int_right.apply(lambda r: euclidean_dist(self.R_base, r), axis=1)
+        int_right = int_right.sort_values("_dist")
+
+        for idx, row in int_right.iterrows():
+            t_R = float(row["time_to_R"]) if pd.notna(row["time_to_R"]) else None
+            t_L = float(row["time_to_L"]) if pd.notna(row["time_to_L"]) else None
+            if t_R is not None:
+                schedule_task(idx, row, "R", "interference_zone_right")
+            else:
+                # 退化：右臂不可达，改用左臂（仍须遵守该区域串行约束）
+                schedule_task(idx, row, "L", "interference_zone_right")
+
+        # ------------------------------------------------------------------ #
+        # 阶段二 A：左臂处理 left_only，按距离左臂基座升序（无干涉约束）      #
+        # ------------------------------------------------------------------ #
+        left_only = self.task_df[self.task_df["region"] == "left_only"].copy()
+        left_only["_dist"] = left_only.apply(lambda r: euclidean_dist(self.L_base, r), axis=1)
+        left_only = left_only.sort_values("_dist")
+
+        for idx, row in left_only.iterrows():
+            schedule_task(idx, row, "L", ig=None)
+
+        # ------------------------------------------------------------------ #
+        # 阶段二 B：右臂处理 right_only，按距离右臂基座升序（无干涉约束）     #
+        # ------------------------------------------------------------------ #
+        right_only = self.task_df[self.task_df["region"] == "right_only"].copy()
+        right_only["_dist"] = right_only.apply(lambda r: euclidean_dist(self.R_base, r), axis=1)
+        right_only = right_only.sort_values("_dist")
+
+        for idx, row in right_only.iterrows():
+            schedule_task(idx, row, "R", ig=None)
 
         return sorted(actions, key=lambda a: a["start"])
 
@@ -1861,6 +1882,19 @@ class RealCostPlanner(DualArmPlannerCore):
         """
         row = self.task_df.iloc[int(task_id[1:])]
         return self._REGION_COLORS.get(str(row["region"]), "gray")
+
+    def _configure_axes(self, ax) -> None:
+        """
+        坐标轴朝向后处理：翻转 x 轴，使显示与 baseline 模式保持一致。
+
+        在 vehicle frame 中，左臂基座 x > 右臂基座 x（L: x≈+0.11, R: x≈-0.46），
+        直接绘制时左臂出现在图的右侧、右臂出现在左侧，与 baseline 方向相反。
+        翻转 x 轴后：
+          - 左臂（x > 0）出现在图的左侧  ✓
+          - 右臂（x < 0）出现在图的右侧 ✓
+        与 baseline 动图的"左臂在左、右臂在右"视觉惯例保持一致。
+        """
+        ax.invert_xaxis()
 
     # ----------------------------------------------------------------------- #
     # RealCost 配置保存                                                        #
