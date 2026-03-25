@@ -66,7 +66,7 @@ class DualArmPlannerCore:
         参数:
             ax: matplotlib Axes 对象
             with_region_labels: 是否为区域添加图例标签（在任务分布图中设为 False
-                以避免与散点标签重复；在动画中设为 True 以显示区域图例）
+                以避免与散点标签重复；在动画中设为 True 以显示区域图例）。
         """
         pass  # 子类覆盖
 
@@ -351,7 +351,7 @@ class DualArmPlannerCore:
         """
         根据启发式动作设置热启动值。
 
-        干涉区按区域动态分组，不再硬编码区域名（如原来的 b2_tasks / b5_tasks）。
+        干涉区按区域动态分组，不再硬编码区域名（如原来的 b2_tasks/b5_tasks）。
         """
         try:
             if not hasattr(model, "_varmap") or model._varmap is None:
@@ -1281,7 +1281,7 @@ class BaselinePlanner(DualArmPlannerCore):
 
     def _compute_processing_time(self, point: np.ndarray, arm: str) -> float:
         """
-        计算采摘时间：2 x 单程移动时间（欧式距离近似）+ 固定处理时间。
+        计算采摘时间：2 × 单程移动时间（欧式距离近似）+ 固定处理时间。
 
         参数:
             point: 草莓位置 [x, y]
