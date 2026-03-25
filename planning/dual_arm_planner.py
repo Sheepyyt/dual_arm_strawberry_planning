@@ -1480,35 +1480,33 @@ class RealCostPlanner(DualArmPlannerCore):
     干涉标签完全由 cost table 真值决定。
     """
 
-    # 默认采样窗口（与 dual_arm_cost.pkl 扫描范围匹配）
-    # x 以 -0.15 为分界线，y 正负分左右侧果实带
-    _DEFAULT_WINDOWS: List[Dict] = [
-        {"name": "W_left_back",   "x_min": -0.65, "x_max": -0.15, "y_min":  0.30, "y_max":  0.60},
-        {"name": "W_left_front",  "x_min": -0.15, "x_max":  0.30, "y_min":  0.30, "y_max":  0.60},
-        {"name": "W_right_back",  "x_min": -0.65, "x_max": -0.15, "y_min": -0.60, "y_max": -0.30},
-        {"name": "W_right_front", "x_min": -0.15, "x_max":  0.30, "y_min": -0.60, "y_max": -0.30},
-    ]
+    # 任务点配色（按区域类型区分）
+    # region 含义：
+    #   "left_only"          — 仅左臂可达（非干涉区）
+    #   "right_only"         — 仅右臂可达（非干涉区）
+    #   "interference_left"  — 双臂均可达，y ≥ 0（车辆左侧干涉区）
+    #   "interference_right" — 双臂均可达，y < 0 （车辆右侧干涉区）
+    _REGION_COLORS: Dict[str, str] = {
+        "left_only":          "steelblue",
+        "right_only":         "tomato",
+        "interference_left":  "darkorange",
+        "interference_right": "mediumpurple",
+    }
 
-    # 窗口背景填充色（顺序与 _DEFAULT_WINDOWS 对应）
-    _WINDOW_FACECOLORS: List[str] = ["lightblue", "lightyellow", "lightsalmon", "lightgreen"]
-
-    # 任务点配色（按可达性区分）
-    _ACCESSIBILITY_COLORS: Dict[str, str] = {
-        "left_only":  "steelblue",
-        "right_only": "tomato",
-        "both":       "darkorange",
+    # 干涉区背景色（绘图用）
+    _ZONE_FACECOLORS: Dict[str, str] = {
+        "interference_left":  "orange",
+        "interference_right": "plum",
     }
 
     def __init__(self,
                  urdf_path: str,
                  cost_pkl_path: str,
-                 windows_config: Optional[List[Dict]] = None,
                  base_operation_time: float = 0.0):
         """
         参数:
             urdf_path: dual_arm_ik.urdf 文件路径（解析基座位置）
             cost_pkl_path: dual_arm_cost.pkl 文件路径
-            windows_config: 采样窗口配置列表；None 则使用默认 4 窗口
             base_operation_time: 单草莓固定处理时间（采摘 + 放置，单位 s）
         """
         # 1. 从 URDF 解析左右臂基座 (x, y)
@@ -1522,9 +1520,6 @@ class RealCostPlanner(DualArmPlannerCore):
         # 2. 加载 cost table
         self.cost_pkl_path = cost_pkl_path
         self._load_cost_tables(cost_pkl_path)
-
-        # 3. 采样窗口
-        self.windows = self._DEFAULT_WINDOWS if windows_config is None else windows_config
 
     # ----------------------------------------------------------------------- #
     # URDF 解析                                                                #
@@ -1580,47 +1575,85 @@ class RealCostPlanner(DualArmPlannerCore):
 
     def sample_tasks_from_cost_table(
             self,
-            n_per_window: Union[int, Dict[str, int]] = 5,
+            n_per_region: Union[int, Dict[str, int]] = 5,
             seed: Optional[int] = None) -> pd.DataFrame:
         """
-        从 cost table 网格点中采样任务（直接使用网格点，不做插值）。
+        从 cost table 网格点中按区域分类后采样任务（直接使用网格点，不做插值）。
+
+        区域定义（vehicle frame y 轴符号决定左/右侧干涉区）：
+          - ``"left_only"``         : 仅左臂可达（非干涉区，任意 y 值）
+          - ``"right_only"``        : 仅右臂可达（非干涉区，任意 y 值）
+          - ``"interference_left"`` : 双臂均可达，y ≥ 0（车辆左侧，独立干涉区）
+          - ``"interference_right"``: 双臂均可达，y < 0 （车辆右侧，独立干涉区）
+
+        两个干涉区在物理上由车辆中心线（y=0）隔开，各自独立串行；
+        不同干涉区的任务可以并行（MILP 分组键不同）。
 
         参数:
-            n_per_window: 每个窗口的采样数量。
-                - ``int``：所有窗口均采用相同数量
-                - ``Dict[str, int]``：每个窗口独立指定，如
-                  ``{"W_left_back": 6, "W_left_front": 4, ...}``
+            n_per_region: 每个区域的采样数量。
+                - ``int``：四个区域均采用相同数量
+                - ``Dict[str, int]``：按区域名独立指定，如
+                  ``{"left_only": 5, "right_only": 5,
+                     "interference_left": 8, "interference_right": 8}``
             seed: 随机种子（None 则不固定）
 
         返回:
             task_df，字段：region, x, y, z, table_key,
-                           accessible_by, is_interference, time_to_L, time_to_R
+                           accessible_by, is_interference, interference_group,
+                           time_to_L, time_to_R
         """
         rng = np.random.default_rng(seed)
 
-        all_keys = set(self.left_cost_table.keys()) | set(self.right_cost_table.keys())
+        # 所有可达网格点（左臂 ∪ 右臂）
+        all_keys = list(set(self.left_cost_table.keys()) | set(self.right_cost_table.keys()))
+
+        # 按区域分桶
+        region_buckets: Dict[str, List[str]] = {
+            "left_only":          [],
+            "right_only":         [],
+            "interference_left":  [],
+            "interference_right": [],
+        }
+        for key in all_keys:
+            parts = key.split("_")
+            y = float(parts[1])
+            l_cost = self.left_cost_table.get(key)
+            r_cost = self.right_cost_table.get(key)
+            if l_cost is not None and r_cost is not None:
+                # 双臂均可达：按 y 符号划分为两个独立干涉区
+                if y >= 0:
+                    region_buckets["interference_left"].append(key)
+                else:
+                    region_buckets["interference_right"].append(key)
+            elif l_cost is not None:
+                region_buckets["left_only"].append(key)
+            elif r_cost is not None:
+                region_buckets["right_only"].append(key)
+
+        # 各区域对应的干涉分组键（MILP 用，None 表示非干涉任务）
+        interference_group_map: Dict[str, Optional[str]] = {
+            "left_only":          None,
+            "right_only":         None,
+            "interference_left":  "interference_zone_left",
+            "interference_right": "interference_zone_right",
+        }
+
         task_data = []
+        for region_name, bucket_keys in region_buckets.items():
+            n = (n_per_region if isinstance(n_per_region, int)
+                 else n_per_region.get(region_name, 5))
 
-        for window in self.windows:
-            w_name = window["name"]
-            n = (n_per_window if isinstance(n_per_window, int)
-                 else n_per_window.get(w_name, 5))
-
-            # 筛选落在该窗口内的可达网格点
-            window_keys = [
-                k for k in all_keys
-                if (window["x_min"] <= float(k.split("_")[0]) <= window["x_max"] and
-                    window["y_min"] <= float(k.split("_")[1]) <= window["y_max"])
-            ]
-
-            if not window_keys:
-                print(f"  Warning: No reachable points in window '{w_name}', skipping.")
+            if not bucket_keys:
+                print(f"  Warning: No reachable points in region '{region_name}', skipping.")
                 continue
 
-            n_actual = min(n, len(window_keys))
+            n_actual = min(n, len(bucket_keys))
             sampled_keys = [
-                str(k) for k in rng.choice(window_keys, size=n_actual, replace=False)
+                str(k) for k in rng.choice(bucket_keys, size=n_actual, replace=False)
             ]
+
+            ig = interference_group_map[region_name]
+            is_int = ig is not None
 
             for key in sampled_keys:
                 parts = key.split("_")
@@ -1635,45 +1668,33 @@ class RealCostPlanner(DualArmPlannerCore):
                 if r_cost is not None:
                     accessible_by.append("R")
 
-                if not accessible_by:
-                    continue  # both_unreachable，跳过
-
-                is_interference = (l_cost is not None and r_cost is not None)
                 time_L = (2.0 * float(l_cost) + self.base_operation_time) if l_cost is not None else None
                 time_R = (2.0 * float(r_cost) + self.base_operation_time) if r_cost is not None else None
 
-                # interference_group：所有双臂可达点同属一个全局干涉区，
-                # 由此在 MILP 中被归入同一组并施加全局串行约束。
-                # 仅单臂可达的点不属于干涉区，interference_group 设为 None。
-                interference_group = "interference_zone" if is_interference else None
-
                 task_data.append({
-                    "region":             w_name,          # 窗口名，仅用于采样/绘图/统计
+                    "region":             region_name,
                     "x":                  x,
                     "y":                  y,
                     "z":                  z,
                     "table_key":          key,
                     "accessible_by":      accessible_by,
-                    "is_interference":    is_interference,
-                    "interference_group": interference_group,  # MILP 全局串行分组键
+                    "is_interference":    is_int,
+                    "interference_group": ig,   # MILP 干涉分组键
                     "time_to_L":          time_L,
                     "time_to_R":          time_R,
                 })
 
         if not task_data:
-            raise RuntimeError("No tasks sampled. Check windows_config and cost table coverage.")
+            raise RuntimeError("No tasks sampled. Check cost table coverage.")
 
         self.task_df = pd.DataFrame(task_data).reset_index(drop=True)
         self._extract_milp_parameters()
 
-        print(f"Sampled {len(self.task_df)} tasks across {len(self.windows)} windows:")
-        for window in self.windows:
-            wn = window["name"]
-            n_w = int((self.task_df["region"] == wn).sum())
-            n_int = int(
-                ((self.task_df["region"] == wn) & self.task_df["is_interference"]).sum()
-            )
-            print(f"  {wn}: {n_w} tasks ({n_int} interference, {n_w - n_int} single-arm)")
+        # 统计摘要
+        print(f"Sampled {len(self.task_df)} tasks across 4 regions:")
+        for rn in ["left_only", "right_only", "interference_left", "interference_right"]:
+            n_r = int((self.task_df["region"] == rn).sum())
+            print(f"  {rn}: {n_r} tasks")
 
         return self.task_df
 
@@ -1689,10 +1710,12 @@ class RealCostPlanner(DualArmPlannerCore):
           1. Left-only 任务：按 time_to_L 升序，依次排入左臂队列。
           2. Right-only 任务：按 time_to_R 升序，依次排入右臂队列
              （与第 1 步并行，两臂各自独立从 t=0 开始）。
-          3. Both-reachable（干涉）任务：按 min(time_to_L, time_to_R) 升序，
+          3. 干涉任务（两种独立干涉区）：按 min(time_to_L, time_to_R) 升序，
              为每个任务选择能最早完成的手臂。
-             所有双臂可达任务共享同一个全局干涉区时间戳（interference_zone_free），
-             严格保证任意两个干涉任务之间不重叠（全局串行）。
+             - interference_zone_left（y ≥ 0，车辆左侧）和
+               interference_zone_right（y < 0，车辆右侧）各自独立串行；
+             - 同一干涉区内的任务不得重叠（独立时间戳约束）；
+             - 两个干涉区之间可以并行执行。
         """
         if self.task_df is None:
             raise ValueError("No task data loaded. Call sample_tasks_from_cost_table() first.")
@@ -1700,9 +1723,12 @@ class RealCostPlanner(DualArmPlannerCore):
         actions: List[Dict] = []
         arm_free: Dict[str, float] = {"L": 0.0, "R": 0.0}
 
-        # 全局干涉区时间戳：任何干涉任务开始前必须等到该时刻
-        # （确保两臂不同时进入干涉区，即双臂在干涉区内始终串行）
-        interference_zone_free: float = 0.0
+        # 两个独立干涉区各自的最早可用时间
+        # （同一干涉区内任意两个任务不重叠，两区间可并行）
+        zone_free: Dict[str, float] = {
+            "interference_zone_left":  0.0,
+            "interference_zone_right": 0.0,
+        }
 
         # ---- 1) left-only 任务 ------------------------------------------- #
         left_only = self.task_df[
@@ -1738,7 +1764,7 @@ class RealCostPlanner(DualArmPlannerCore):
                 "start": start, "end": end,
             })
 
-        # ---- 3) both-reachable（干涉）任务：全局串行 ----------------------- #
+        # ---- 3) 干涉任务：两独立区各自串行 --------------------------------- #
         both = self.task_df[self.task_df["is_interference"]].copy()
         both["_min_cost"] = both.apply(
             lambda r: min(
@@ -1753,23 +1779,27 @@ class RealCostPlanner(DualArmPlannerCore):
             t_L = float(row["time_to_L"]) if pd.notna(row["time_to_L"]) else None
             t_R = float(row["time_to_R"]) if pd.notna(row["time_to_R"]) else None
 
-            # 每个干涉任务必须等到：该手臂空闲 AND 干涉区全局空闲
-            end_L = (max(arm_free["L"], interference_zone_free) + t_L) if t_L is not None else float("inf")
-            end_R = (max(arm_free["R"], interference_zone_free) + t_R) if t_R is not None else float("inf")
+            # 该任务所属的干涉区（决定使用哪个独立时间戳）
+            ig = str(row["interference_group"])
+            z_free = zone_free.get(ig, 0.0)
+
+            # 每个干涉任务必须等到：该手臂空闲 AND 所属干涉区空闲
+            end_L = (max(arm_free["L"], z_free) + t_L) if t_L is not None else float("inf")
+            end_R = (max(arm_free["R"], z_free) + t_R) if t_R is not None else float("inf")
 
             if end_L <= end_R:
                 chosen = "L"
-                start = max(arm_free["L"], interference_zone_free)
+                start = max(arm_free["L"], z_free)
                 end = end_L
                 arm_free["L"] = end
             else:
                 chosen = "R"
-                start = max(arm_free["R"], interference_zone_free)
+                start = max(arm_free["R"], z_free)
                 end = end_R
                 arm_free["R"] = end
 
-            # 更新全局干涉区时间戳，下一个干涉任务必须在此之后才能开始
-            interference_zone_free = end
+            # 仅更新所属干涉区的时间戳（不影响另一个干涉区）
+            zone_free[ig] = end
             actions.append({
                 "task": f"t{idx}", "arm": chosen,
                 "x": row["x"], "y": row["y"],
@@ -1784,37 +1814,53 @@ class RealCostPlanner(DualArmPlannerCore):
 
     def _draw_environment_background(self, ax, with_region_labels: bool = True) -> None:
         """
-        绘制采样窗口矩形（半透明填充）作为环境背景。
+        绘制区域背景：y=0 车辆中心线 + 两个独立干涉区的半透明色块。
 
-        参数:
-            ax: matplotlib Axes 对象
-            with_region_labels: True 时为窗口矩形添加图例标签。
+        区域定义（vehicle frame）：
+          y ≥ 0 → interference_left（车辆左侧干涉区，橙色）
+          y < 0 → interference_right（车辆右侧干涉区，紫色）
+
+        非干涉任务（left_only / right_only）无固定几何区域，
+        仅由点颜色区分，不绘制矩形背景。
         """
-        for i, window in enumerate(self.windows):
-            x0 = window["x_min"]
-            y0 = window["y_min"]
-            w = window["x_max"] - window["x_min"]
-            h = window["y_max"] - window["y_min"]
-            facecolor = self._WINDOW_FACECOLORS[i % len(self._WINDOW_FACECOLORS)]
-            label = window["name"] if with_region_labels else "_nolegend_"
-            ax.add_patch(plt.Rectangle(
-                (x0, y0), w, h,
-                facecolor=facecolor, alpha=0.25,
-                edgecolor="gray", linewidth=1.5,
-                label=label,
-            ))
+        # 坐标轴范围（从已采样任务推断，或使用保守默认值）
+        if self.task_df is not None and len(self.task_df) > 0:
+            x_min = self.task_df["x"].min() - 0.08
+            x_max = self.task_df["x"].max() + 0.08
+            y_abs_max = max(abs(self.task_df["y"].min()), abs(self.task_df["y"].max())) + 0.08
+        else:
+            x_min, x_max, y_abs_max = -0.70, 0.35, 0.65
+
+        # 左侧干涉区（y ≥ 0）半透明色块
+        label_l = "Interference zone left (y≥0)" if with_region_labels else "_nolegend_"
+        ax.add_patch(plt.Rectangle(
+            (x_min, 0.0), x_max - x_min, y_abs_max,
+            facecolor=self._ZONE_FACECOLORS["interference_left"],
+            alpha=0.10, edgecolor="none", label=label_l,
+        ))
+
+        # 右侧干涉区（y < 0）半透明色块
+        label_r = "Interference zone right (y<0)" if with_region_labels else "_nolegend_"
+        ax.add_patch(plt.Rectangle(
+            (x_min, -y_abs_max), x_max - x_min, y_abs_max,
+            facecolor=self._ZONE_FACECOLORS["interference_right"],
+            alpha=0.10, edgecolor="none", label=label_r,
+        ))
+
+        # y=0 车辆中心线（虚线）
+        ax.axhline(y=0.0, color="dimgray", linewidth=1.2, linestyle="--",
+                   alpha=0.6, label="Vehicle centerline (y=0)")
 
     def _get_task_color(self, task_id: str) -> str:
         """
-        根据任务可达性返回绘图颜色：
-        left-only → 蓝（steelblue），right-only → 红（tomato），both → 橙（darkorange）。
+        根据任务区域返回绘图颜色：
+          left_only          → steelblue
+          right_only         → tomato
+          interference_left  → darkorange
+          interference_right → mediumpurple
         """
         row = self.task_df.iloc[int(task_id[1:])]
-        if row["is_interference"]:
-            return self._ACCESSIBILITY_COLORS["both"]
-        if "L" in row["accessible_by"]:
-            return self._ACCESSIBILITY_COLORS["left_only"]
-        return self._ACCESSIBILITY_COLORS["right_only"]
+        return self._REGION_COLORS.get(str(row["region"]), "gray")
 
     # ----------------------------------------------------------------------- #
     # RealCost 配置保存                                                        #
@@ -1824,6 +1870,11 @@ class RealCostPlanner(DualArmPlannerCore):
         """保存 real-cost 模式实验配置（JSON）。"""
         import json
 
+        region_summary = {}
+        if self.task_df is not None:
+            for rn in ["left_only", "right_only", "interference_left", "interference_right"]:
+                region_summary[rn] = int((self.task_df["region"] == rn).sum())
+
         config = {
             "mode": "real_cost",
             "cost_pkl_path": str(self.cost_pkl_path),
@@ -1831,13 +1882,19 @@ class RealCostPlanner(DualArmPlannerCore):
                 "left":  self.L_base.tolist(),
                 "right": self.R_base.tolist(),
             },
-            "windows": self.windows,
+            "regions": {
+                "left_only":          "仅左臂可达（非干涉区）",
+                "right_only":         "仅右臂可达（非干涉区）",
+                "interference_left":  "双臂均可达，y≥0（车辆左侧，独立干涉区）",
+                "interference_right": "双臂均可达，y<0 （车辆右侧，独立干涉区）",
+            },
+            "task_counts_per_region": region_summary,
             "total_tasks": len(self.task_df) if self.task_df is not None else 0,
-            "accessibility_colors": self._ACCESSIBILITY_COLORS,
+            "region_colors": self._REGION_COLORS,
         }
 
         with open(os.path.join(config_dir, "experiment_config.json"), "w") as f:
-            json.dump(config, f, indent=2)
+            json.dump(config, f, indent=2, ensure_ascii=False)
 
 
 # ===========================================================================
