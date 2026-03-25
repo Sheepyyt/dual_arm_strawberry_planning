@@ -82,11 +82,19 @@ class DualArmPlannerCore:
         """
         从 task_df 中提取 MILP 所需参数。
         干涉区判断使用 task_df 的 ``is_interference`` 字段，不依赖区域名硬编码。
+
+        干涉分组键（``interference_groups``）：
+          - 若 task_df 含 ``interference_group`` 列，则使用该列值；
+          - 否则向后兼容，退化为使用 ``region`` 列值（即 baseline 行为不变）。
+        这允许 RealCostPlanner 将所有双臂可达任务归入同一组实现全局串行，
+        而 BaselinePlanner 沿用 B2/B5 各自分组的原有行为，两者互不影响。
         """
+        has_ig = "interference_group" in self.task_df.columns
         parameters = {
             "tasks": [],
             "positions": {},
             "regions": {},
+            "interference_groups": {},
             "accessibility": {},
             "processing_time": {},
             "interference_set": set()
@@ -96,6 +104,13 @@ class DualArmPlannerCore:
             parameters["tasks"].append(task_id)
             parameters["positions"][task_id] = (row["x"], row["y"])
             parameters["regions"][task_id] = row["region"]
+            # 干涉分组键：优先使用 interference_group 列（非 NaN），否则退化为 region
+            # 注意：非干涉任务的 interference_group 为 NaN，退化为 region 不影响正确性
+            # （非干涉任务不在 interference_set 中，其 interference_groups 值永远不被 MILP 访问）
+            if has_ig and pd.notna(row["interference_group"]):
+                parameters["interference_groups"][task_id] = str(row["interference_group"])
+            else:
+                parameters["interference_groups"][task_id] = row["region"]
             parameters["accessibility"][task_id] = row["accessible_by"]
             if row["is_interference"]:
                 parameters["interference_set"].add(task_id)
@@ -241,10 +256,12 @@ class DualArmPlannerCore:
                         )
 
         # 约束 4. 干涉区内的任务必须串行
-        # 按区域动态分组，不再硬编码区域名（如原来的 b2_tasks / b5_tasks）
+        # 按 interference_groups 动态分组（不再硬编码区域名）
+        # BaselinePlanner: interference_groups == regions (B2/B5 各自独立)
+        # RealCostPlanner: 所有双臂可达任务同属 "interference_zone"，全局串行
         interference_by_region: Dict[str, List[str]] = defaultdict(list)
         for i in interference_tasks:
-            interference_by_region[self.milp_params["regions"][i]].append(i)
+            interference_by_region[self.milp_params["interference_groups"][i]].append(i)
 
         for region_name, region_task_list in interference_by_region.items():
             for idx_i in range(len(region_task_list)):
@@ -438,10 +455,10 @@ class DualArmPlannerCore:
                 else:
                     v.Start = 0
 
-            # 按区域动态分组，不再硬编码区域名
+            # 按 interference_groups 动态分组（与 build_milp_model 保持一致）
             interference_by_region: Dict[str, List[str]] = defaultdict(list)
             for tid in self.milp_params["interference_set"]:
-                interference_by_region[self.milp_params["regions"][tid]].append(tid)
+                interference_by_region[self.milp_params["interference_groups"][tid]].append(tid)
 
             for region_name, region_task_list in interference_by_region.items():
                 task_times = [(tid, t_warm[tid]) for tid in region_task_list if tid in t_warm]
@@ -1625,16 +1642,22 @@ class RealCostPlanner(DualArmPlannerCore):
                 time_L = (2.0 * float(l_cost) + self.base_operation_time) if l_cost is not None else None
                 time_R = (2.0 * float(r_cost) + self.base_operation_time) if r_cost is not None else None
 
+                # interference_group：所有双臂可达点同属一个全局干涉区，
+                # 由此在 MILP 中被归入同一组并施加全局串行约束。
+                # 仅单臂可达的点不属于干涉区，interference_group 设为 None。
+                interference_group = "interference_zone" if is_interference else None
+
                 task_data.append({
-                    "region":          w_name,
-                    "x":               x,
-                    "y":               y,
-                    "z":               z,
-                    "table_key":       key,
-                    "accessible_by":   accessible_by,
-                    "is_interference": is_interference,
-                    "time_to_L":       time_L,
-                    "time_to_R":       time_R,
+                    "region":             w_name,          # 窗口名，仅用于采样/绘图/统计
+                    "x":                  x,
+                    "y":                  y,
+                    "z":                  z,
+                    "table_key":          key,
+                    "accessible_by":      accessible_by,
+                    "is_interference":    is_interference,
+                    "interference_group": interference_group,  # MILP 全局串行分组键
+                    "time_to_L":          time_L,
+                    "time_to_R":          time_R,
                 })
 
         if not task_data:
@@ -1667,7 +1690,9 @@ class RealCostPlanner(DualArmPlannerCore):
           2. Right-only 任务：按 time_to_R 升序，依次排入右臂队列
              （与第 1 步并行，两臂各自独立从 t=0 开始）。
           3. Both-reachable（干涉）任务：按 min(time_to_L, time_to_R) 升序，
-             为每个任务选择能最早完成的手臂，同时遵守同窗口干涉任务串行约束。
+             为每个任务选择能最早完成的手臂。
+             所有双臂可达任务共享同一个全局干涉区时间戳（interference_zone_free），
+             严格保证任意两个干涉任务之间不重叠（全局串行）。
         """
         if self.task_df is None:
             raise ValueError("No task data loaded. Call sample_tasks_from_cost_table() first.")
@@ -1675,8 +1700,9 @@ class RealCostPlanner(DualArmPlannerCore):
         actions: List[Dict] = []
         arm_free: Dict[str, float] = {"L": 0.0, "R": 0.0}
 
-        # 每个窗口的最早可用时间（确保同窗口干涉任务串行）
-        window_free: Dict[str, float] = {w["name"]: 0.0 for w in self.windows}
+        # 全局干涉区时间戳：任何干涉任务开始前必须等到该时刻
+        # （确保两臂不同时进入干涉区，即双臂在干涉区内始终串行）
+        interference_zone_free: float = 0.0
 
         # ---- 1) left-only 任务 ------------------------------------------- #
         left_only = self.task_df[
@@ -1712,7 +1738,7 @@ class RealCostPlanner(DualArmPlannerCore):
                 "start": start, "end": end,
             })
 
-        # ---- 3) both-reachable（干涉）任务 --------------------------------- #
+        # ---- 3) both-reachable（干涉）任务：全局串行 ----------------------- #
         both = self.task_df[self.task_df["is_interference"]].copy()
         both["_min_cost"] = both.apply(
             lambda r: min(
@@ -1724,27 +1750,26 @@ class RealCostPlanner(DualArmPlannerCore):
         both = both.sort_values("_min_cost")
 
         for idx, row in both.iterrows():
-            region = row["region"]
             t_L = float(row["time_to_L"]) if pd.notna(row["time_to_L"]) else None
             t_R = float(row["time_to_R"]) if pd.notna(row["time_to_R"]) else None
-            win_t = window_free.get(region, 0.0)
 
-            # 选择能最早完成的手臂
-            end_L = (max(arm_free["L"], win_t) + t_L) if t_L is not None else float("inf")
-            end_R = (max(arm_free["R"], win_t) + t_R) if t_R is not None else float("inf")
+            # 每个干涉任务必须等到：该手臂空闲 AND 干涉区全局空闲
+            end_L = (max(arm_free["L"], interference_zone_free) + t_L) if t_L is not None else float("inf")
+            end_R = (max(arm_free["R"], interference_zone_free) + t_R) if t_R is not None else float("inf")
 
             if end_L <= end_R:
                 chosen = "L"
-                start = max(arm_free["L"], win_t)
+                start = max(arm_free["L"], interference_zone_free)
                 end = end_L
                 arm_free["L"] = end
             else:
                 chosen = "R"
-                start = max(arm_free["R"], win_t)
+                start = max(arm_free["R"], interference_zone_free)
                 end = end_R
                 arm_free["R"] = end
 
-            window_free[region] = end
+            # 更新全局干涉区时间戳，下一个干涉任务必须在此之后才能开始
+            interference_zone_free = end
             actions.append({
                 "task": f"t{idx}", "arm": chosen,
                 "x": row["x"], "y": row["y"],
