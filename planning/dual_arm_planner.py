@@ -5,11 +5,21 @@ import pandas as pd
 import gurobipy as gp
 from gurobipy import GRB
 import os
+import pickle
 import time
 from typing import List, Dict, Tuple, Optional, Union
 
 
-class DualArmPlanner:
+def _parse_cost_key(key: str) -> Tuple[float, float, float]:
+    """将 cost table 的字符串键解析为 (x, y, z) 浮点数三元组。
+    键格式：'{x:.3f}_{y:.3f}_{z:.3f}'，例如 '-0.450_0.300_0.560'。
+    连字符 '-' 与分隔符 '_' 不同，负数不影响分割结果。
+    """
+    parts = key.split("_")
+    return float(parts[0]), float(parts[1]), float(parts[2])
+
+
+class DualArmPlannerCore:
     
     # 初始化函数，设置机械臂位置、区域配置（包括区域中心、大小、各臂可达性）、采摘时间模型参数等
     def __init__(self, 
@@ -87,6 +97,7 @@ class DualArmPlanner:
                     "x": float(pt[0]),
                     "y": float(pt[1]),
                     "accessible_by": arm_access,
+                    "is_interference": name in self.interference_regions,
                     "time_to_L": time_L,
                     "time_to_R": time_R,
                 })
@@ -131,6 +142,7 @@ class DualArmPlanner:
                 "x": x,
                 "y": y,
                 "accessible_by": arm_access,
+                "is_interference": region_name in self.interference_regions,
                 "time_to_L": time_L,
                 "time_to_R": time_R,
             })
@@ -683,6 +695,7 @@ class DualArmPlanner:
         ax.set_aspect('equal')
         ax.grid(True)
         ax.set_title(title)
+        self._configure_axes(ax)
         
         # 初始化任务点
         task_points = {}
@@ -990,6 +1003,7 @@ class DualArmPlanner:
         ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax2.grid(True, alpha=0.3)
         ax2.set_aspect('equal')
+        self._configure_axes(ax2)
         
         plt.tight_layout()
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -1102,7 +1116,15 @@ class DualArmPlanner:
         ax.set_xlabel('Time (s)')
         ax.set_title('Arm Activity Timeline')
         ax.grid(True, alpha=0.3)
-    
+
+    # 可视化坐标轴配置钩子（子类可覆盖）
+    def _configure_axes(self, ax) -> None:
+        """
+        可视化坐标轴配置钩子。
+        默认不做任何操作。子类（如 RealCostPlanner）可覆盖此方法以调整坐标轴方向等。
+        """
+        pass
+
     # 保存原始数据文件
     def _save_raw_data(self, data_dir: str) -> None:
         # 保存任务数据
@@ -1253,3 +1275,276 @@ class DualArmPlanner:
         plt.savefig(os.path.join(analysis_dir, 'performance_comparison.png'), 
                    dpi=300, bbox_inches='tight')
         plt.close(fig)
+
+# =============================================================================
+# BaselinePlanner: 使用欧氏距离近似 + 连续随机采样（继承所有核心功能，无覆写）
+# =============================================================================
+class BaselinePlanner(DualArmPlannerCore):
+    """
+    Baseline 规划器。
+    ‧ 单程移动时间用欧氏距离近似（继承 DualArmPlannerCore._compute_processing_time）。
+    ‧ 任务点在各区域矩形内连续随机采样（继承 DualArmPlannerCore.create_task_dataset）。
+    所有其他功能（MILP、启发式、可视化等）完全继承自 DualArmPlannerCore，不做任何修改。
+    """
+    pass
+
+
+# =============================================================================
+# RealCostPlanner: 使用 cost table 查表 + 离散网格采样
+# =============================================================================
+class RealCostPlanner(DualArmPlannerCore):
+    """
+    真实代价规划器。
+    ‧ 单程移动时间从预计算的 cost table（pkl 文件）查表获得。
+    ‧ 任务点只从 cost table 中已覆盖的离散网格点里筛选采样。
+    ‧ 采用保守策略：
+        - 非干涉区（B1/B3/B4/B6）：即使 cost table 显示双臂均可达，也强制只允许主臂。
+        - 干涉区（B2/B5）：允许只有一侧可达的点，accessible_by 只保留实际可达臂。
+    所有其他功能（MILP、启发式、可视化等）完全继承自 DualArmPlannerCore。
+    """
+
+    def __init__(self,
+                 cost_table_path: str,
+                 z_work: float = 0.56,
+                 L_base: np.ndarray = np.array([0.10866, 0.22875]),
+                 R_base: np.ndarray = np.array([-0.45806, -0.22875]),
+                 **kwargs):
+        """
+        参数:
+            cost_table_path: dual_arm_cost.pkl 文件路径。
+            z_work: 采摘工作面的 z 高度（vehicle frame），用于构造 cost table key。
+            L_base: 左臂基座在 vehicle frame 的 (x, y) 位置。
+                    默认值 [0.10866, 0.22875] 来自 URDF joint 'vehicle_to_left_arm' 的
+                    origin xyz（取 x, y 分量）。
+            R_base: 右臂基座在 vehicle frame 的 (x, y) 位置。
+                    默认值 [-0.45806, -0.22875] 来自 URDF joint 'vehicle_to_right_arm' 的
+                    origin xyz（取 x, y 分量）。
+            **kwargs: 其余参数透传给 DualArmPlannerCore（如 regions_config、base_operation_time）。
+        """
+        super().__init__(L_base=L_base, R_base=R_base, **kwargs)
+        self.z_work = float(z_work)
+        self._load_cost_table(cost_table_path)
+
+    # ------------------------------------------------------------------
+    # 内部辅助方法
+    # ------------------------------------------------------------------
+    def _load_cost_table(self, path: str) -> None:
+        """从 pkl 文件加载 cost table。"""
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+        self.left_cost_table: Dict[str, float] = data["left_cost_table"]
+        self.right_cost_table: Dict[str, float] = data["right_cost_table"]
+
+    def _make_key(self, x: float, y: float) -> str:
+        """
+        将 (x, y) 坐标映射到 cost table 的字符串键。
+        对输入坐标做 grid snap（步长 0.02 m），与 build_roi_table.py 的 step_xyz 保持一致。
+        """
+        step = 0.02
+        xs = round(round(x / step) * step, 3)
+        ys = round(round(y / step) * step, 3)
+        return f"{xs:.3f}_{ys:.3f}_{self.z_work:.3f}"
+
+    def _one_way_time(self, key: str, arm: str) -> Optional[float]:
+        """从 cost table 查单程移动时间；未找到时返回 None。"""
+        table = self.left_cost_table if arm == "L" else self.right_cost_table
+        return table.get(key, None)
+
+    # ------------------------------------------------------------------
+    # 覆写：处理时间计算（cost table 查表替代欧氏距离）
+    # ------------------------------------------------------------------
+    def _compute_processing_time(self, point: np.ndarray, arm: str) -> Optional[float]:
+        """
+        从 cost table 查单程移动时间，计算总处理时间：
+            processing_time = 2 × one_way_time + base_operation_time
+        若该点不在 cost table 中，返回 None（表示不可达）。
+        """
+        key = self._make_key(float(point[0]), float(point[1]))
+        one_way = self._one_way_time(key, arm)
+        if one_way is None:
+            return None
+        return 2.0 * one_way + self.base_operation_time
+
+    # ------------------------------------------------------------------
+    # 覆写：任务数据集创建（离散网格采样 + 保守策略）
+    # ------------------------------------------------------------------
+    def create_task_dataset(self, points_per_region: Dict[str, int]) -> pd.DataFrame:
+        """
+        从 cost table 的可达离散点中为各区域采样任务。
+        保守策略：
+            - 非干涉区（B1/B3/B4/B6）：强制只允许区域主臂，忽略另一臂的可达性。
+            - 干涉区（B2/B5）：允许只有一臂可达的点，accessible_by 只保留实际可达臂。
+        """
+        task_data = []
+
+        # 预先合并两个 cost table 的 key 集合，用于候选点查找
+        all_keys = set(self.left_cost_table.keys()) | set(self.right_cost_table.keys())
+
+        for region in self.regions:
+            cx, cy = region["center"]
+            w, h = region["width"], region["height"]
+            name = region["name"]
+            num_points = points_per_region.get(name, 5)
+
+            x_min, x_max = cx - w / 2, cx + w / 2
+            y_min, y_max = cy - h / 2, cy + h / 2
+
+            # 筛选落在该区域矩形内的 cost table key
+            candidates = [
+                k for k in all_keys
+                if x_min <= _parse_cost_key(k)[0] <= x_max
+                and y_min <= _parse_cost_key(k)[1] <= y_max
+            ]
+
+            if not candidates:
+                print(f"[RealCostPlanner] Warning: region {name} 在 cost table 中无覆盖点，跳过。")
+                continue
+
+            n_sample = min(num_points, len(candidates))
+            sampled_keys = list(np.random.choice(candidates, size=n_sample, replace=False))
+
+            for key in sampled_keys:
+                kx, ky, _ = _parse_cost_key(key)
+                one_way_L = self._one_way_time(key, "L")
+                one_way_R = self._one_way_time(key, "R")
+
+                # 应用保守策略
+                if name in ("B1", "B4"):          # 仅左臂区域
+                    if one_way_L is None:
+                        continue                  # 主臂不可达，跳过
+                    accessible = ["L"]
+                    time_L = 2.0 * one_way_L + self.base_operation_time
+                    time_R = None
+
+                elif name in ("B3", "B6"):        # 仅右臂区域
+                    if one_way_R is None:
+                        continue                  # 主臂不可达，跳过
+                    accessible = ["R"]
+                    time_L = None
+                    time_R = 2.0 * one_way_R + self.base_operation_time
+
+                else:                             # B2 / B5（干涉区）
+                    accessible = []
+                    time_L = None
+                    time_R = None
+                    if one_way_L is not None:
+                        accessible.append("L")
+                        time_L = 2.0 * one_way_L + self.base_operation_time
+                    if one_way_R is not None:
+                        accessible.append("R")
+                        time_R = 2.0 * one_way_R + self.base_operation_time
+                    if not accessible:
+                        continue                  # 双臂均不可达，跳过
+
+                task_data.append({
+                    "region": name,
+                    "x": float(kx),
+                    "y": float(ky),
+                    "accessible_by": accessible,
+                    "is_interference": name in self.interference_regions,
+                    "time_to_L": time_L,
+                    "time_to_R": time_R,
+                })
+
+        if not task_data:
+            raise RuntimeError(
+                "[RealCostPlanner] 未能从 cost table 中采样到任何任务点。"
+                "请检查 cost table 覆盖范围是否涵盖所有区域，或先运行 roi/build_roi_table.py 扩大扫描范围。"
+            )
+
+        self.task_df = pd.DataFrame(task_data)
+        self._extract_milp_parameters()
+        return self.task_df
+
+    # ------------------------------------------------------------------
+    # 覆写：加载自定义任务位置（cost table 查表 + 保守策略）
+    # ------------------------------------------------------------------
+    def load_task_locations(self, task_locations: List[Dict]) -> pd.DataFrame:
+        """
+        从字典列表加载自定义任务位置，使用 cost table 查表计算处理时间。
+        输入坐标会做 grid snap（步长 0.02 m）以匹配 cost table 键格式。
+        保守策略与 create_task_dataset 相同。
+        """
+        task_data = []
+
+        for task in task_locations:
+            x = float(task["x"])
+            y = float(task["y"])
+            region_name = task["region"]
+
+            region_config = next((r for r in self.regions if r["name"] == region_name), None)
+            if region_config is None:
+                raise ValueError(f"Region {region_name} not found in configuration.")
+
+            key = self._make_key(x, y)
+            one_way_L = self._one_way_time(key, "L")
+            one_way_R = self._one_way_time(key, "R")
+
+            # 应用保守策略
+            if region_name in ("B1", "B4"):
+                if one_way_L is None:
+                    print(f"[RealCostPlanner] Warning: ({x:.3f}, {y:.3f}) 在 {region_name} "
+                          f"中左臂不可达（cost table 无此键），跳过。")
+                    continue
+                accessible = ["L"]
+                time_L = 2.0 * one_way_L + self.base_operation_time
+                time_R = None
+
+            elif region_name in ("B3", "B6"):
+                if one_way_R is None:
+                    print(f"[RealCostPlanner] Warning: ({x:.3f}, {y:.3f}) 在 {region_name} "
+                          f"中右臂不可达（cost table 无此键），跳过。")
+                    continue
+                accessible = ["R"]
+                time_L = None
+                time_R = 2.0 * one_way_R + self.base_operation_time
+
+            else:   # B2 / B5
+                accessible = []
+                time_L = None
+                time_R = None
+                if one_way_L is not None:
+                    accessible.append("L")
+                    time_L = 2.0 * one_way_L + self.base_operation_time
+                if one_way_R is not None:
+                    accessible.append("R")
+                    time_R = 2.0 * one_way_R + self.base_operation_time
+                if not accessible:
+                    print(f"[RealCostPlanner] Warning: ({x:.3f}, {y:.3f}) 在 {region_name} "
+                          f"中双臂均不可达，跳过。")
+                    continue
+
+            task_data.append({
+                "region": region_name,
+                "x": x,
+                "y": y,
+                "accessible_by": accessible,
+                "is_interference": region_name in self.interference_regions,
+                "time_to_L": time_L,
+                "time_to_R": time_R,
+            })
+
+        if not task_data:
+            raise RuntimeError(
+                "[RealCostPlanner] 加载的所有任务点均不可达或不在 cost table 覆盖范围内。"
+            )
+
+        self.task_df = pd.DataFrame(task_data)
+        self._extract_milp_parameters()
+        return self.task_df
+
+    # ------------------------------------------------------------------
+    # 覆写：坐标轴配置（翻转 x 轴，使左臂视觉上在左侧）
+    # ------------------------------------------------------------------
+    def _configure_axes(self, ax) -> None:
+        """
+        翻转 x 轴，使 URDF 中 x 较大的左臂（x = +0.10866 m）在视图左侧显示，
+        x 较小的右臂（x = -0.45806 m）在视图右侧显示，视觉方向与实机一致。
+        """
+        ax.invert_xaxis()
+
+
+# =============================================================================
+# 向后兼容别名（保留 DualArmPlanner 名称，指向 BaselinePlanner）
+# =============================================================================
+DualArmPlanner = BaselinePlanner

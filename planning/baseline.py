@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from dual_arm_planner import DualArmPlanner
+from dual_arm_planner import DualArmPlanner, BaselinePlanner, RealCostPlanner
 import os
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 import numpy as np
@@ -166,24 +166,73 @@ def example_analyze_multiple_scenarios():
     
     return results
 
+# 示例 4：使用 RealCostPlanner（真实 cost table + 离散网格采样）
+def example_with_real_cost():
+    print("\n=== Example 4: Real Cost Planner (cost table lookup) ===")
+    np.random.seed(42)
+
+    # cost table 文件路径
+    cost_table_path = os.path.join(SCRIPT_DIR, "..", "roi", "results", "dual_arm_cost.pkl")
+    if not os.path.exists(cost_table_path):
+        print(f"Cost table not found at {cost_table_path}. "
+              "Please run roi/build_roi_table.py first to generate it.")
+        return None
+
+    # 创建 RealCostPlanner 实例（使用 URDF 的实际臂基座位置）
+    optimizer = RealCostPlanner(cost_table_path=cost_table_path)
+
+    # 每个区域采样任务数
+    points_per_region = {
+        "B1": 5,
+        "B2": 2,
+        "B3": 2,
+        "B4": 3,
+        "B5": 2,
+        "B6": 2,
+    }
+
+    task_df = optimizer.create_task_dataset(points_per_region)
+    print(f"Created {len(task_df)} tasks from cost table")
+    print(task_df.head())
+
+    # 统计各区域覆盖情况
+    for region in ["B1", "B2", "B3", "B4", "B5", "B6"]:
+        rdf = task_df[task_df["region"] == region]
+        if not rdf.empty:
+            left_count = rdf["accessible_by"].apply(lambda a: "L" in a).sum()
+            right_count = rdf["accessible_by"].apply(lambda a: "R" in a).sum()
+            print(f"  {region}: {len(rdf)} tasks  (L={left_count}, R={right_count})")
+
+    print("\n=== Running optimization ===")
+    heuristic_actions, milp_actions, improvement = optimizer.solve_optimization(
+        time_limit=20,
+        heuristic_name="spatial_order"
+    )
+
+    optimizer.save_results(os.path.join(SCRIPT_DIR, "results", "realcost_results"))
+    return optimizer
+
 
 if __name__ == "__main__":
     # 运行示例
     print("Dual-Arm Harvesting Optimizer Examples")
     print("=" * 50)
-    
-    # 示例 1：随机生成任务位置
+
+    # 示例 1：随机生成任务位置（Baseline，欧氏距离近似）
     optimizer1 = example_with_random_tasks()
-    
-    # 示例 2：自定义任务位置
+
+    # 示例 2：自定义任务位置（Baseline）
     # optimizer2 = example_with_custom_tasks()
-    
-    # 示例 3：多场景分析
+
+    # 示例 3：多场景分析（Baseline）
     # scenario_results = example_analyze_multiple_scenarios()
-    
+
+    # 示例 4：真实 cost table（RealCostPlanner）
+    # optimizer4 = example_with_real_cost()
+
     print("\n" + "=" * 50)
     print("All examples completed! Check the result directories for outputs.")
     print("Files generated:")
     print("- *_animation.gif: Task execution animations")
-    print("- *_gantt.png: Gantt chart visualizations") 
+    print("- *_gantt.png: Gantt chart visualizations")
     print("- comparison_summary.txt: Detailed comparison results")
