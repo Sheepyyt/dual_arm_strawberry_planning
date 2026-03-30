@@ -40,14 +40,18 @@ class DualArmPlannerCore:
         self.base_operation_time = base_operation_time
 
         # 如果不传入参数，则使用默认的 B1-B6 六个区域
+        # 注意：arm_access 基于实际 IK 可达性统计（见 roi/build_roi_table.py 结果）：
+        #   B1/B4（负 x 侧）：右臂可达 ~90-99%，左臂仅约 28-30%  → 右臂专属（保守策略）
+        #   B2/B5（中间区）  ：左臂约 93-95%，右臂约 39-49%      → 双臂干涉区
+        #   B3/B6（正 x 侧）：左臂约 55-86%，右臂 0%             → 左臂专属
         if regions_config is None:
             self.regions = [
-                {"center": (-0.4, 0.5), "width": 0.4, "height": 0.4, "name": "B1", "arm_access": ["L"]},
+                {"center": (-0.4, 0.5), "width": 0.4, "height": 0.4, "name": "B1", "arm_access": ["R"]},
                 {"center": ( 0.0, 0.5), "width": 0.4, "height": 0.4, "name": "B2", "arm_access": ["L", "R"]},
-                {"center": ( 0.4, 0.5), "width": 0.4, "height": 0.4, "name": "B3", "arm_access": ["R"]},
-                {"center": (-0.4,-0.5), "width": 0.4, "height": 0.4, "name": "B4", "arm_access": ["L"]},
+                {"center": ( 0.4, 0.5), "width": 0.4, "height": 0.4, "name": "B3", "arm_access": ["L"]},
+                {"center": (-0.4,-0.5), "width": 0.4, "height": 0.4, "name": "B4", "arm_access": ["R"]},
                 {"center": ( 0.0,-0.5), "width": 0.4, "height": 0.4, "name": "B5", "arm_access": ["L", "R"]},
-                {"center": ( 0.4,-0.5), "width": 0.4, "height": 0.4, "name": "B6", "arm_access": ["R"]},
+                {"center": ( 0.4,-0.5), "width": 0.4, "height": 0.4, "name": "B6", "arm_access": ["L"]},
             ]
         else:
             self.regions = regions_config   # 如果传入了参数，则使用自定义区域配置
@@ -256,8 +260,9 @@ class DualArmPlannerCore:
     def spatial_order_heuristic(self) -> List[Dict]:
         """
         基于区域的空间顺序启发式算法。
-        左臂: B2 → B1 → B4 (先干涉区域，然后是自己的区域)
-        右臂: B5 → B6 → B3 (先干涉区域，然后是自己的区域)
+        左臂: B2 → B3 → B6 (先干涉区域，然后是仅左臂区域)
+        右臂: B5 → B1 → B4 (先干涉区域，然后是仅右臂区域)
+        注：区域分配基于实际 IK 统计，B3/B6 为左臂专属，B1/B4 为右臂专属。
         """
         if self.task_df is None:
             raise ValueError("No task data loaded.")
@@ -267,8 +272,8 @@ class DualArmPlannerCore:
         region_busy_until = {'B2': 0.0, 'B5': 0.0}
         
         # 更新序列：每个手臂优先处理其干涉区域
-        left_arm_order = ['B2', 'B1', 'B4']   # 左臂：干涉区 B2，然后是仅左臂区域
-        right_arm_order = ['B5', 'B6', 'B3']  # 右臂：干涉区 B5，然后是仅右臂区域 
+        left_arm_order = ['B2', 'B3', 'B6']   # 左臂：干涉区 B2，然后是仅左臂区域 B3/B6
+        right_arm_order = ['B5', 'B1', 'B4']  # 右臂：干涉区 B5，然后是仅右臂区域 B1/B4
                 
         # 处理单个区域的核心调度器：负责规划某一只手臂在某一个具体区域内的所有动作
         def schedule_region_tasks(arm, region, start_time):
@@ -312,7 +317,7 @@ class DualArmPlannerCore:
         
         # 左臂调度流程
         left_time = arm_times['L']
-        print("Left arm sequence: B2 -> B1 -> B4")
+        print("Left arm sequence: B2 -> B3 -> B6")
         for region in left_arm_order:
             region_actions, left_time = schedule_region_tasks('L', region, left_time)
             actions.extend(region_actions)
@@ -320,7 +325,7 @@ class DualArmPlannerCore:
         
         # 右臂调度流程
         right_time = arm_times['R']
-        print("Right arm sequence: B5 -> B6 -> B3")
+        print("Right arm sequence: B5 -> B1 -> B4")
         for region in right_arm_order:
             region_actions, right_time = schedule_region_tasks('R', region, right_time)
             actions.extend(region_actions)
@@ -1408,20 +1413,20 @@ class RealCostPlanner(DualArmPlannerCore):
                 one_way_L = self._one_way_time(key, "L")
                 one_way_R = self._one_way_time(key, "R")
 
-                # 应用保守策略
-                if name in ("B1", "B4"):          # 仅左臂区域
-                    if one_way_L is None:
-                        continue                  # 主臂不可达，跳过
-                    accessible = ["L"]
-                    time_L = 2.0 * one_way_L + self.base_operation_time
-                    time_R = None
-
-                elif name in ("B3", "B6"):        # 仅右臂区域
+                # 应用保守策略（与 regions 默认 arm_access 保持一致）
+                if name in ("B1", "B4"):          # 仅右臂区域（R-dominant，保守策略强制 R-only）
                     if one_way_R is None:
                         continue                  # 主臂不可达，跳过
                     accessible = ["R"]
                     time_L = None
                     time_R = 2.0 * one_way_R + self.base_operation_time
+
+                elif name in ("B3", "B6"):        # 仅左臂区域（L-only，右臂实际不可达）
+                    if one_way_L is None:
+                        continue                  # 主臂不可达，跳过
+                    accessible = ["L"]
+                    time_L = 2.0 * one_way_L + self.base_operation_time
+                    time_R = None
 
                 else:                             # B2 / B5（干涉区）
                     accessible = []
@@ -1480,17 +1485,8 @@ class RealCostPlanner(DualArmPlannerCore):
             one_way_L = self._one_way_time(key, "L")
             one_way_R = self._one_way_time(key, "R")
 
-            # 应用保守策略
-            if region_name in ("B1", "B4"):
-                if one_way_L is None:
-                    print(f"[RealCostPlanner] Warning: ({x:.3f}, {y:.3f}) 在 {region_name} "
-                          f"中左臂不可达（cost table 无此键），跳过。")
-                    continue
-                accessible = ["L"]
-                time_L = 2.0 * one_way_L + self.base_operation_time
-                time_R = None
-
-            elif region_name in ("B3", "B6"):
+            # 应用保守策略（与 regions 默认 arm_access 保持一致）
+            if region_name in ("B1", "B4"):       # 仅右臂区域
                 if one_way_R is None:
                     print(f"[RealCostPlanner] Warning: ({x:.3f}, {y:.3f}) 在 {region_name} "
                           f"中右臂不可达（cost table 无此键），跳过。")
@@ -1498,6 +1494,15 @@ class RealCostPlanner(DualArmPlannerCore):
                 accessible = ["R"]
                 time_L = None
                 time_R = 2.0 * one_way_R + self.base_operation_time
+
+            elif region_name in ("B3", "B6"):     # 仅左臂区域
+                if one_way_L is None:
+                    print(f"[RealCostPlanner] Warning: ({x:.3f}, {y:.3f}) 在 {region_name} "
+                          f"中左臂不可达（cost table 无此键），跳过。")
+                    continue
+                accessible = ["L"]
+                time_L = 2.0 * one_way_L + self.base_operation_time
+                time_R = None
 
             else:   # B2 / B5
                 accessible = []

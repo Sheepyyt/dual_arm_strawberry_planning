@@ -25,6 +25,56 @@ PLOT_CONFIG = {
     "figure_file": os.path.join(os.path.dirname(os.path.abspath(__file__)), "results/dual_arm_roi_coverage.png"),
 }
 
+# B1-B6 规划区域定义（与 dual_arm_planner.py 中的默认区域保持一致）
+PLANNING_REGIONS = [
+    {"name": "B1", "cx": -0.4, "cy":  0.5, "w": 0.4, "h": 0.4, "arm": "R-only"},
+    {"name": "B2", "cx":  0.0, "cy":  0.5, "w": 0.4, "h": 0.4, "arm": "Interference"},
+    {"name": "B3", "cx":  0.4, "cy":  0.5, "w": 0.4, "h": 0.4, "arm": "L-only"},
+    {"name": "B4", "cx": -0.4, "cy": -0.5, "w": 0.4, "h": 0.4, "arm": "R-only"},
+    {"name": "B5", "cx":  0.0, "cy": -0.5, "w": 0.4, "h": 0.4, "arm": "Interference"},
+    {"name": "B6", "cx":  0.4, "cy": -0.5, "w": 0.4, "h": 0.4, "arm": "L-only"},
+]
+
+# 区域颜色（与 arm 类型对应）
+_REGION_COLORS = {"R-only": "#5CA4E0", "L-only": "#E07B5C", "Interference": "#8BBB60"}
+
+
+def draw_planning_regions(ax, alpha_face=0.10, alpha_edge=0.8):
+    """在坐标轴上叠加 B1-B6 规划区域的矩形框。"""
+    for r in PLANNING_REGIONS:
+        color = _REGION_COLORS[r["arm"]]
+        rect = patches.Rectangle(
+            (r["cx"] - r["w"] / 2, r["cy"] - r["h"] / 2),
+            r["w"], r["h"],
+            linewidth=1.5,
+            edgecolor=color,
+            facecolor=color,
+            alpha=alpha_face,
+            linestyle="-",
+            zorder=2,
+        )
+        ax.add_patch(rect)
+        # 框边线（单独画，alpha 更高）
+        border = patches.Rectangle(
+            (r["cx"] - r["w"] / 2, r["cy"] - r["h"] / 2),
+            r["w"], r["h"],
+            linewidth=1.5,
+            edgecolor=color,
+            facecolor="none",
+            alpha=alpha_edge,
+            linestyle="--",
+            zorder=3,
+        )
+        ax.add_patch(border)
+        ax.text(
+            r["cx"], r["cy"],
+            f'{r["name"]}\n({r["arm"]})',
+            ha="center", va="center",
+            fontsize=7, color=color, fontweight="bold",
+            zorder=4,
+        )
+
+
 # =========================================================
 # vehicle body drawing
 # =========================================================
@@ -85,6 +135,21 @@ def draw_vehicle(ax, plot_cfg, T_left, T_right):
     return x_min, x_max, y_min, y_max
 
 
+def _setup_ax(ax, title, T_left, T_right):
+    """统一配置各子图的坐标轴。"""
+    draw_vehicle(ax, PLOT_CONFIG, T_left, T_right)
+    draw_planning_regions(ax)
+    ax.set_title(title, fontsize=11)
+    ax.set_xlabel("x in vehicle frame (m)")
+    ax.set_ylabel("y in vehicle frame (m)")
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.4)
+    ax.scatter(T_left[0, 3], T_left[1, 3], c="#819CC4", marker="*", s=200,
+               label="Left arm base", zorder=5)
+    ax.scatter(T_right[0, 3], T_right[1, 3], c="#8CC19A", marker="*", s=200,
+               label="Right arm base", zorder=5)
+
+
 # =========================================================
 # plotting
 # =========================================================
@@ -125,59 +190,55 @@ def plot_dual_arm_roi(roi_payload, cfg, T_left, T_right):
         else:
             summary_groups["both_unreachable"].append((x, y))
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig, axes = plt.subplots(1, 3, figsize=(21, 7))
+    fig.suptitle(
+        f"Dual-Arm IK Coverage @ z = {target_z:.3f} m (vehicle frame)\n"
+        "Dashed rectangles: B1-B6 planning regions  |  "
+        "B1/B4=R-only (blue)  B2/B5=Interference (green)  B3/B6=L-only (orange)",
+        fontsize=10,
+    )
 
     # ---------- subplot 1: left arm ----------
     ax = axes[0]
-    draw_vehicle(ax, PLOT_CONFIG, T_left, T_right)
+    _setup_ax(ax, f"Left-arm IK coverage @ z={target_z:.3f}", T_left, T_right)
 
     left_color = {
         "unreachable": "#BB5F76",
         "reachable": "#AFC4E4",
     }
     left_label = {
-        "unreachable": "Unreachable",
-        "reachable": "Reachable",
+        "unreachable": "Unreachable (L)",
+        "reachable": "Reachable (L)",
     }
     for cls, pts in left_groups.items():
         if pts:
             pts = np.asarray(pts)
-            ax.scatter(pts[:, 0], pts[:, 1], s=18, c=left_color[cls], label=left_label[cls])
-
-    ax.scatter(T_left[0, 3], T_left[1, 3], c="#819CC4", marker="*", s=180, label="Left arm base")
-    ax.scatter(T_right[0, 3], T_right[1, 3], c="#8CC19A", marker="*", s=180, label="Right arm base")
-    ax.set_title(f"Left-arm coverage @ z={target_z:.3f}")
-    ax.set_xlabel("x in vehicle frame (m)")
-    ax.set_ylabel("y in vehicle frame (m)")
-    ax.set_aspect("equal")
-    ax.grid(True)
-    ax.legend(loc="best")
+            ax.scatter(pts[:, 0], pts[:, 1], s=14, c=left_color[cls],
+                       label=left_label[cls], zorder=1)
+    ax.legend(loc="best", fontsize=8)
 
     # ---------- subplot 2: right arm ----------
     ax = axes[1]
-    draw_vehicle(ax, PLOT_CONFIG, T_left, T_right)
+    _setup_ax(ax, f"Right-arm IK coverage @ z={target_z:.3f}", T_left, T_right)
 
     right_color = {
         "unreachable": "#BB5F76",
         "reachable": "#BEE4C8",
     }
+    right_label = {
+        "unreachable": "Unreachable (R)",
+        "reachable": "Reachable (R)",
+    }
     for cls, pts in right_groups.items():
         if pts:
             pts = np.asarray(pts)
-            ax.scatter(pts[:, 0], pts[:, 1], s=18, c=right_color[cls], label=left_label[cls])
-
-    ax.scatter(T_left[0, 3], T_left[1, 3], c="#819CC4", marker="*", s=180, label="Left arm base")
-    ax.scatter(T_right[0, 3], T_right[1, 3], c="#8CC19A", marker="*", s=180, label="Right arm base")
-    ax.set_title(f"Right-arm coverage @ z={target_z:.3f}")
-    ax.set_xlabel("x in vehicle frame (m)")
-    ax.set_ylabel("y in vehicle frame (m)")
-    ax.set_aspect("equal")
-    ax.grid(True)
-    ax.legend(loc="best")
+            ax.scatter(pts[:, 0], pts[:, 1], s=14, c=right_color[cls],
+                       label=right_label[cls], zorder=1)
+    ax.legend(loc="best", fontsize=8)
 
     # ---------- subplot 3: combined accessibility ----------
     ax = axes[2]
-    draw_vehicle(ax, PLOT_CONFIG, T_left, T_right)
+    _setup_ax(ax, f"Combined accessibility @ z={target_z:.3f}", T_left, T_right)
 
     summary_color = {
         "both_unreachable": "#BB5F76",
@@ -195,22 +256,26 @@ def plot_dual_arm_roi(roi_payload, cfg, T_left, T_right):
     for cls, pts in summary_groups.items():
         if pts:
             pts = np.asarray(pts)
-            ax.scatter(pts[:, 0], pts[:, 1], s=18, c=summary_color[cls], label=summary_label[cls])
+            ax.scatter(pts[:, 0], pts[:, 1], s=14, c=summary_color[cls],
+                       label=summary_label[cls], zorder=1)
+    ax.legend(loc="best", fontsize=8)
 
-    ax.scatter(T_left[0, 3], T_left[1, 3], c="#819CC4", marker="*", s=180, label="Left arm base")
-    ax.scatter(T_right[0, 3], T_right[1, 3], c="#8CC19A", marker="*", s=180, label="Right arm base")
-    ax.set_title(f"Combined accessibility @ z={target_z:.3f}")
-    ax.set_xlabel("x in vehicle frame (m)")
-    ax.set_ylabel("y in vehicle frame (m)")
-    ax.set_aspect("equal")
-    ax.grid(True)
-    ax.legend(loc="best")
+    # ---------- region legend (shared) ----------
+    from matplotlib.lines import Line2D
+    region_legend = [
+        Line2D([0], [0], color=_REGION_COLORS["R-only"],   lw=2, linestyle="--", label="B1/B4 R-only"),
+        Line2D([0], [0], color=_REGION_COLORS["Interference"], lw=2, linestyle="--", label="B2/B5 Interference"),
+        Line2D([0], [0], color=_REGION_COLORS["L-only"],   lw=2, linestyle="--", label="B3/B6 L-only"),
+    ]
+    fig.legend(handles=region_legend, loc="lower center", ncol=3,
+               fontsize=9, title="Planning regions", bbox_to_anchor=(0.5, -0.02))
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0.04, 1, 1])
 
     if PLOT_CONFIG["figure_file"]:
         os.makedirs(os.path.dirname(PLOT_CONFIG["figure_file"]), exist_ok=True)
         plt.savefig(PLOT_CONFIG["figure_file"], dpi=300, bbox_inches="tight")
+        print(f"Saved coverage plot to {PLOT_CONFIG['figure_file']}")
 
     plt.show()
 
