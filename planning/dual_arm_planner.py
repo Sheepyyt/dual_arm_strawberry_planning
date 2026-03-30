@@ -5,47 +5,63 @@ import pandas as pd
 import gurobipy as gp
 from gurobipy import GRB
 import os
+import pickle
 import time
+from abc import ABC, abstractmethod
+from collections import defaultdict
 from typing import List, Dict, Tuple, Optional, Union
 
 
-class DualArmPlanner:
+# =========================================================
+# 默认区域配置（B1~B6 正方形区域），两种模式共用
+# B2/B5 为干涉区，B1/B3/B4/B6 为非干涉区（各臂专属区）
+# =========================================================
+_DEFAULT_REGIONS = [
+    {"center": (-0.4,  0.5), "width": 0.4, "height": 0.4, "name": "B1", "arm_access": ["L"]},
+    {"center": ( 0.0,  0.5), "width": 0.4, "height": 0.4, "name": "B2", "arm_access": ["L", "R"]},
+    {"center": ( 0.4,  0.5), "width": 0.4, "height": 0.4, "name": "B3", "arm_access": ["R"]},
+    {"center": (-0.4, -0.5), "width": 0.4, "height": 0.4, "name": "B4", "arm_access": ["L"]},
+    {"center": ( 0.0, -0.5), "width": 0.4, "height": 0.4, "name": "B5", "arm_access": ["L", "R"]},
+    {"center": ( 0.4, -0.5), "width": 0.4, "height": 0.4, "name": "B6", "arm_access": ["R"]},
+]
+_DEFAULT_COLORS = ["red", "orange", "green", "blue", "purple", "brown"]
+_DEFAULT_INTERFERENCE = ["B2", "B5"]
+
+
+# =========================================================
+# 抽象基类：DualArmPlannerCore
+# 包含两种模式完全共用的所有模块：
+#   热启动、启发式算法、MILP 建模、解提取、
+#   结果保存、动画、甘特图等可视化函数。
+# 子类只需实现：
+#   create_task_dataset() —— 采样方式（连续 vs 离散网格）
+#   _compute_processing_time() —— 处理时间来源（欧式距离 vs cost table）
+# =========================================================
+class DualArmPlannerCore(ABC):
     
-    # 初始化函数，设置机械臂位置、区域配置（包括区域中心、大小、各臂可达性）、采摘时间模型参数等
-    def __init__(self, 
-                 L_base: np.ndarray = np.array([-0.3, 0]), 
-                 R_base: np.ndarray = np.array([0.3, 0]),
-                 regions_config: Optional[List[Dict]] = None,
+    def __init__(self,
+                 L_base: np.ndarray,
+                 R_base: np.ndarray,
+                 regions_config: List[Dict],
+                 colors: List[str],
+                 interference_regions: List[str],
                  base_operation_time: float = 0.0):
         """
-                参数:
-                 L_base: 左臂基座位置 (x, y)
-                 R_base: 右臂基座位置 (x, y)
-                 regions_config: 采摘区域配置。
-                 base_operation_time: 单个草莓的固定处理时间（包括采摘、放置等）。
+        参数:
+            L_base: 左臂基座位置 (x, y)
+            R_base: 右臂基座位置 (x, y)
+            regions_config: 采摘区域配置列表
+            colors: 各区域对应颜色（与 regions_config 等长）
+            interference_regions: 干涉区域名称列表
+            base_operation_time: 每颗草莓的固定处理时间
         """
-
         self.L_base = L_base
         self.R_base = R_base
+        self.regions = regions_config
+        self.colors = colors
+        self.interference_regions = interference_regions
         self.base_operation_time = base_operation_time
 
-        # 如果不传入参数，则使用默认的 B1-B6 六个区域
-        if regions_config is None:
-            self.regions = [
-                {"center": (-0.4, 0.5), "width": 0.4, "height": 0.4, "name": "B1", "arm_access": ["L"]},
-                {"center": ( 0.0, 0.5), "width": 0.4, "height": 0.4, "name": "B2", "arm_access": ["L", "R"]},
-                {"center": ( 0.4, 0.5), "width": 0.4, "height": 0.4, "name": "B3", "arm_access": ["R"]},
-                {"center": (-0.4,-0.5), "width": 0.4, "height": 0.4, "name": "B4", "arm_access": ["L"]},
-                {"center": ( 0.0,-0.5), "width": 0.4, "height": 0.4, "name": "B5", "arm_access": ["L", "R"]},
-                {"center": ( 0.4,-0.5), "width": 0.4, "height": 0.4, "name": "B6", "arm_access": ["R"]},
-            ]
-        else:
-            self.regions = regions_config   # 如果传入了参数，则使用自定义区域配置
-            
-        # 可视化的区域颜色
-        self.colors = ["red", "orange", "green", "blue", "purple", "brown"]
-        self.interference_regions = ["B2", "B5"]
-        
         # 数据存储
         self.task_df = None
         self.milp_params = None
@@ -53,47 +69,28 @@ class DualArmPlanner:
         self.milp_actions = None
         self.improvement = 0
 
+    # ------------------------------------------------------------------
+    # 子类必须实现的抽象方法
+    # ------------------------------------------------------------------
 
-    # 创建随机草莓任务数据集
+    @abstractmethod
     def create_task_dataset(self, points_per_region: Dict[str, int]) -> pd.DataFrame:
         """
-        创建随机草莓任务数据集
-        输入：每个区域的任务点数量
-        输出：每个草莓的具体位置、对左右臂的可达性、采摘时间等
+        创建任务数据集。
+        Baseline: 在正方形区域内连续随机采样
+        RealCost: 从 cost table 离散网格点中采样
         """
-        task_data = []
-        
-        # 遍历每个区域，获取区域配置（中心、大小、可达性等）
-        for i, region in enumerate(self.regions):
-            cx, cy = region["center"]
-            w, h = region["width"], region["height"]
-            arm_access = region["arm_access"]
-            name = region["name"]
-            
-            # 获取该区域需要生成的任务点数量（如果没有指定，则默认 5 个）
-            num_points = points_per_region.get(name, 5)
-            # 生成随机点
-            points = self.generate_random_points((cx, cy), w, h, num_points)
-            
-            # 为每个草莓计算处理时间并存储任务数据
-            for pt in points:
-                # 用统一的时间函数计算各草莓分别对于左右臂的处理时间
-                time_L = self._compute_processing_time(pt, "L") if "L" in arm_access else None
-                time_R = self._compute_processing_time(pt, "R") if "R" in arm_access else None
+        pass
 
-                # 存储任务数据（区域名、位置、可达性、处理时间）
-                task_data.append({
-                    "region": name,
-                    "x": float(pt[0]),
-                    "y": float(pt[1]),
-                    "accessible_by": arm_access,
-                    "time_to_L": time_L,
-                    "time_to_R": time_R,
-                })
-        
-        self.task_df = pd.DataFrame(task_data)
-        self._extract_milp_parameters()
-        return self.task_df
+    @abstractmethod
+    def _compute_processing_time(self, point: np.ndarray, arm: str) -> Optional[float]:
+        """
+        计算单颗草莓对某只臂的处理时间（秒）。
+        返回 None 表示该臂不可达此点。
+        Baseline: 2 * 欧式距离 + base_operation_time
+        RealCost: 2 * cost_table 单程代价 + base_operation_time
+        """
+        pass
 
     # 在指定矩形范围内生成随机点
     def generate_random_points(self, center: Tuple[float, float], width: float, height: float, n: int = 5) -> np.ndarray:
@@ -106,6 +103,7 @@ class DualArmPlanner:
     def load_task_locations(self, task_locations: List[Dict]) -> pd.DataFrame:
         """
         从字典列表中加载任务位置。
+        处理时间由子类的 _compute_processing_time() 计算。
         """
         task_data = []
         
@@ -114,15 +112,12 @@ class DualArmPlanner:
             y = float(task["y"])
             region_name = task["region"]
             
-            # 找到该任务所在区域的配置，拿到 arm_access
             region_config = next((r for r in self.regions if r["name"] == region_name), None)
             if region_config is None:
                 raise ValueError(f"Region {region_name} not found in configuration.")
             arm_access = region_config["arm_access"]
             
             pt = np.array([x, y])
-
-            # 用统一的时间函数计算处理时间
             time_L = self._compute_processing_time(pt, "L") if "L" in arm_access else None
             time_R = self._compute_processing_time(pt, "R") if "R" in arm_access else None
             
@@ -130,7 +125,7 @@ class DualArmPlanner:
                 "region": region_name,
                 "x": x,
                 "y": y,
-                "accessible_by": arm_access,
+                "accessible_by": list(arm_access),
                 "time_to_L": time_L,
                 "time_to_R": time_R,
             })
@@ -138,28 +133,6 @@ class DualArmPlanner:
         self.task_df = pd.DataFrame(task_data)
         self._extract_milp_parameters()
         return self.task_df
-
-
-    # 计算单个草莓的处理时间
-    def _compute_processing_time(self, point: np.ndarray, arm: str) -> float:
-        """
-        计算采摘时间：2 * 单程移动时间 + 固定处理时间。
-        单程移动时间在此处用欧式距离近似。
-        参数:
-            point: 草莓位置 [x, y]
-            arm: 'L' 或 'R'
-        """
-        if arm == "L":
-            base = self.L_base
-        else:
-            base = self.R_base
-
-        # 计算单程移动时间（基座到草莓的欧式距离近似）
-        one_way_time = float(np.linalg.norm(point - base))
-        
-        # 返回总处理时间：2 * 单程移动时间 + 固定处理时间
-        total_time = 2 * one_way_time + self.base_operation_time
-        return total_time
 
     # 从 task_df 中提取 MILP 所需的参数
     def _extract_milp_parameters(self):
@@ -243,16 +216,17 @@ class DualArmPlanner:
     # 空间顺序启发式算法
     def spatial_order_heuristic(self) -> List[Dict]:
         """
-        基于区域的空间顺序启发式算法。
+        基于区域的空间顺序启发式算法（两种模式共用）。
         左臂: B2 → B1 → B4 (先干涉区域，然后是自己的区域)
         右臂: B5 → B6 → B3 (先干涉区域，然后是自己的区域)
+        最后对任何未被调度的任务做兜底处理。
         """
         if self.task_df is None:
             raise ValueError("No task data loaded.")
         
         actions = []
         arm_times = {'L': 0.0, 'R': 0.0}
-        region_busy_until = {'B2': 0.0, 'B5': 0.0}
+        region_busy_until = {r: 0.0 for r in self.interference_regions}
         
         # 更新序列：每个手臂优先处理其干涉区域
         left_arm_order = ['B2', 'B1', 'B4']   # 左臂：干涉区 B2，然后是仅左臂区域
@@ -276,7 +250,7 @@ class DualArmPlanner:
             # 调度该区域内的所有任务
             region_actions = []
             for idx, row in region_tasks.iterrows():
-                if region in ['B2', 'B5']:
+                if region in self.interference_regions:
                     # 如果是干涉区，必须等上一个占用的任务释放该区域
                     actual_start = max(current_time, region_busy_until[region])
                     region_busy_until[region] = actual_start + row[f"time_to_{arm}"]
@@ -314,6 +288,30 @@ class DualArmPlanner:
             actions.extend(region_actions)
             arm_times['R'] = right_time
         
+        # 兜底：处理未被以上两轮调度到的任务
+        # （例如干涉区内仅对另一臂可达的草莓，或区域名不在默认顺序中的草莓）
+        scheduled_tasks = {a["task"] for a in actions}
+        for idx, row in self.task_df.iterrows():
+            task_id = f"t{idx}"
+            if task_id not in scheduled_tasks:
+                arm = row["accessible_by"][0]
+                region = row["region"]
+                if region in self.interference_regions:
+                    actual_start = max(arm_times[arm], region_busy_until.get(region, 0.0))
+                    region_busy_until[region] = actual_start + row[f"time_to_{arm}"]
+                else:
+                    actual_start = arm_times[arm]
+                end_time = actual_start + row[f"time_to_{arm}"]
+                actions.append({
+                    "task": task_id,
+                    "arm": arm,
+                    "x": row["x"],
+                    "y": row["y"],
+                    "start": actual_start,
+                    "end": end_time,
+                })
+                arm_times[arm] = end_time
+
         return sorted(actions, key=lambda x: x["start"])
 
     # 把 MILP 约束翻译成 Gurobi 能理解的形式
@@ -386,15 +384,16 @@ class DualArmPlanner:
                             name=f"seq_{j}_{i}_{a}"
                         )
         
-        # 约束 4. 干涉区内的任务必须串行
-        b2_tasks = [i for i in interference_tasks if self.milp_params["regions"][i] == "B2"]
-        b5_tasks = [i for i in interference_tasks if self.milp_params["regions"][i] == "B5"]
+        # 约束 4. 干涉区内的任务必须串行（按区域分组，动态处理，不硬编码区域名）
+        interference_groups: Dict[str, List[str]] = defaultdict(list)
+        for task_id in interference_tasks:
+            interference_groups[self.milp_params["regions"][task_id]].append(task_id)
         
-        for region_tasks in [b2_tasks, b5_tasks]:
-            for idx_i in range(len(region_tasks)):
-                for idx_j in range(idx_i + 1, len(region_tasks)):
-                    i = region_tasks[idx_i]
-                    j = region_tasks[idx_j]
+        for group_tasks in interference_groups.values():
+            for idx_i in range(len(group_tasks)):
+                for idx_j in range(idx_i + 1, len(group_tasks)):
+                    i = group_tasks[idx_i]
+                    j = group_tasks[idx_j]
                     
                     y_ij = model.addVar(vtype=GRB.BINARY, name=f"region_order_{i}_{j}")
                     y_ji = model.addVar(vtype=GRB.BINARY, name=f"region_order_{j}_{i}")
@@ -571,11 +570,12 @@ class DualArmPlanner:
                     v.Start = 0
 
             interference_tasks = self.milp_params["interference_set"]
-            b2_tasks = [tid for tid in interference_tasks if self.milp_params["regions"][tid] == "B2"]
-            b5_tasks = [tid for tid in interference_tasks if self.milp_params["regions"][tid] == "B5"]
+            interference_groups: Dict[str, List[str]] = defaultdict(list)
+            for tid in interference_tasks:
+                interference_groups[self.milp_params["regions"][tid]].append(tid)
 
-            for region_tasks in [b2_tasks, b5_tasks]:
-                task_times = [(tid, t_warm[tid]) for tid in region_tasks if tid in t_warm]
+            for group_tids in interference_groups.values():
+                task_times = [(tid, t_warm[tid]) for tid in group_tids if tid in t_warm]
                 task_times.sort(key=lambda x: x[1])
                 sorted_tids = [x[0] for x in task_times]
 
@@ -590,10 +590,10 @@ class DualArmPlanner:
                         if v_ji is not None:
                             v_ji.Start = 0
 
-            print(f"Warm start values set successfully (B scheme). Heuristic makespan: {T_warm:.2f}s")
+            print(f"Warm start values set successfully. Heuristic makespan: {T_warm:.2f}s")
 
         except Exception as e:
-            print(f"Warning: Could not set warm start values (B scheme): {e}")
+            print(f"Warning: Could not set warm start values: {e}")
     
     # 保存结果
     def save_results(self, result_dir: str = "result") -> None:
@@ -664,7 +664,6 @@ class DualArmPlanner:
             w, h = region["width"], region["height"]
             name = region["name"]
             color = self.colors[i]
-            
             ax.add_patch(plt.Rectangle((cx - w/2, cy - h/2), w, h, 
                                      fill=False, edgecolor=color, linewidth=2, label=name))
         
@@ -683,6 +682,9 @@ class DualArmPlanner:
         ax.set_aspect('equal')
         ax.grid(True)
         ax.set_title(title)
+
+        # 按区域名建立配色索引（两种模式通用）
+        region_color_map = {r["name"]: self.colors[i] for i, r in enumerate(self.regions)}
         
         # 初始化任务点
         task_points = {}
@@ -691,9 +693,7 @@ class DualArmPlanner:
         for act in actions:
             task_id = act['task']
             region_name = self.task_df.iloc[int(task_id[1:])]['region']
-            region_idx = next(i for i, r in enumerate(self.regions) if r['name'] == region_name)
-            color = self.colors[region_idx]
-            
+            color = region_color_map.get(region_name, 'gray')
             point, = ax.plot(act['x'], act['y'], 'o', color=color, markersize=8, alpha=0.8)
             task_points[task_id] = point
             task_states[task_id] = False
@@ -736,8 +736,7 @@ class DualArmPlanner:
                     task_points[task_id].remove()
                     
                     region_name = self.task_df.iloc[int(task_id[1:])]['region']
-                    region_idx = next(i for i, r in enumerate(self.regions) if r['name'] == region_name)
-                    color = self.colors[region_idx]
+                    color = region_color_map.get(region_name, 'gray')
                     
                     new_point, = ax.plot(act['x'], act['y'], 'x', color=color, 
                                        markersize=12, markeredgewidth=3)
@@ -779,20 +778,18 @@ class DualArmPlanner:
         
         fig, ax = plt.subplots(figsize=(12, 6))
         
-        region_colors = {
-            'B1': 'red', 'B2': 'orange', 'B3': 'green',
-            'B4': 'blue', 'B5': 'purple', 'B6': 'brown'
-        }
+        # 动态生成区域配色映射（两种模式通用）
+        region_colors = {r["name"]: self.colors[i] for i, r in enumerate(self.regions)}
         
         left_actions = [a for a in actions if a['arm'] == 'L']
         right_actions = [a for a in actions if a['arm'] == 'R']
         
         # 绘制任务
-        for i, action in enumerate(left_actions):
+        for action in left_actions:
             task_id = action['task']
             task_idx = int(task_id[1:])
             region = self.task_df.iloc[task_idx]['region']
-            color = region_colors[region]
+            color = region_colors.get(region, 'gray')
             
             ax.barh(0, action['end'] - action['start'], left=action['start'], 
                    height=0.4, color=color, alpha=0.7, edgecolor='black')
@@ -801,11 +798,11 @@ class DualArmPlanner:
             ax.text(mid_time, 0, f"{task_id}\n{region}", ha='center', va='center', 
                    fontsize=8, fontweight='bold')
         
-        for i, action in enumerate(right_actions):
+        for action in right_actions:
             task_id = action['task']
             task_idx = int(task_id[1:])
             region = self.task_df.iloc[task_idx]['region']
-            color = region_colors[region]
+            color = region_colors.get(region, 'gray')
             
             ax.barh(1, action['end'] - action['start'], left=action['start'], 
                    height=0.4, color=color, alpha=0.7, edgecolor='black')
@@ -958,7 +955,8 @@ class DualArmPlanner:
         
         # 按区域统计任务数量
         region_counts = self.task_df['region'].value_counts().sort_index()
-        colors = [self.colors[i] for i in range(len(region_counts))]
+        region_color_map = {r["name"]: self.colors[i] for i, r in enumerate(self.regions)}
+        colors = [region_color_map.get(name, 'gray') for name in region_counts.index]
         
         ax1.bar(region_counts.index, region_counts.values, color=colors, alpha=0.7, edgecolor='black')
         ax1.set_title('Task Count by Region')
@@ -1253,3 +1251,223 @@ class DualArmPlanner:
         plt.savefig(os.path.join(analysis_dir, 'performance_comparison.png'), 
                    dpi=300, bbox_inches='tight')
         plt.close(fig)
+
+# =========================================================
+# BaselinePlanner：Baseline 模式子类
+# 欧式距离近似处理时间 + 连续随机采样
+# =========================================================
+class BaselinePlanner(DualArmPlannerCore):
+    """
+    Baseline 模式：B1~B6 正方形区域 + 欧式距离处理时间 + 连续随机采样。
+    与原有 DualArmPlanner 行为完全一致。
+    所有核心模块（热启动、启发式、MILP、可视化）从 DualArmPlannerCore 继承。
+    """
+
+    def __init__(self,
+                 L_base: np.ndarray = np.array([-0.3, 0.]),
+                 R_base: np.ndarray = np.array([0.3, 0.]),
+                 regions_config: Optional[List[Dict]] = None,
+                 base_operation_time: float = 0.0):
+        super().__init__(
+            L_base=L_base,
+            R_base=R_base,
+            regions_config=regions_config if regions_config is not None else _DEFAULT_REGIONS,
+            colors=_DEFAULT_COLORS,
+            interference_regions=_DEFAULT_INTERFERENCE,
+            base_operation_time=base_operation_time,
+        )
+
+    def _compute_processing_time(self, point: np.ndarray, arm: str) -> float:
+        """处理时间 = 2 * 欧式距离（单程近似）+ 固定处理时间。"""
+        base = self.L_base if arm == "L" else self.R_base
+        one_way_time = float(np.linalg.norm(point - base))
+        return 2.0 * one_way_time + self.base_operation_time
+
+    def create_task_dataset(self, points_per_region: Dict[str, int]) -> pd.DataFrame:
+        """
+        在每个正方形区域内连续随机采样，处理时间用欧式距离近似。
+        accessible_by 直接取自区域配置（arm_access）。
+        """
+        task_data = []
+        for region in self.regions:
+            cx, cy = region["center"]
+            w, h = region["width"], region["height"]
+            arm_access = region["arm_access"]
+            name = region["name"]
+            num_points = points_per_region.get(name, 5)
+            points = self.generate_random_points((cx, cy), w, h, num_points)
+            for pt in points:
+                time_L = self._compute_processing_time(pt, "L") if "L" in arm_access else None
+                time_R = self._compute_processing_time(pt, "R") if "R" in arm_access else None
+                task_data.append({
+                    "region": name,
+                    "x": float(pt[0]),
+                    "y": float(pt[1]),
+                    "accessible_by": list(arm_access),
+                    "time_to_L": time_L,
+                    "time_to_R": time_R,
+                })
+        self.task_df = pd.DataFrame(task_data)
+        self._extract_milp_parameters()
+        return self.task_df
+
+
+# =========================================================
+# RealCostPlanner：Real Cost 模式子类
+# cost table 真实 IK 代价 + cost table 离散网格采样
+# =========================================================
+class RealCostPlanner(DualArmPlannerCore):
+    """
+    Real Cost 模式：保留 B1~B6 正方形区域（保守安全几何假设），
+    用 cost table 中的真实 IK 代价替代欧式距离，
+    任务点在 cost table 离散网格中采样（不做插值）。
+
+    非干涉区 (B1/B3/B4/B6)：强制只允许主负责臂（保守安全策略）。
+    干涉区 (B2/B5)：根据 cost table 实际可达性决定 accessible_by（方案 A）。
+    所有核心模块（热启动、启发式、MILP、可视化）从 DualArmPlannerCore 继承。
+    """
+
+    # 非干涉区与其主负责臂的映射（保守安全策略）
+    _REGION_PRIMARY_ARM: Dict[str, str] = {"B1": "L", "B4": "L", "B3": "R", "B6": "R"}
+
+    def __init__(self,
+                 cost_table_path: str,
+                 L_base: np.ndarray = np.array([-0.3, 0.]),
+                 R_base: np.ndarray = np.array([0.3, 0.]),
+                 regions_config: Optional[List[Dict]] = None,
+                 base_operation_time: float = 0.0,
+                 step_xyz: float = 0.02,
+                 z: float = 0.56):
+        """
+        参数:
+            cost_table_path: dual_arm_cost.pkl 文件路径
+            step_xyz: cost table 的空间网格步长（与 build_roi_table.py 一致）
+            z: 草莓所在高度（vehicle frame，与 cost table 扫描高度一致）
+        """
+        super().__init__(
+            L_base=L_base,
+            R_base=R_base,
+            regions_config=regions_config if regions_config is not None else _DEFAULT_REGIONS,
+            colors=_DEFAULT_COLORS,
+            interference_regions=_DEFAULT_INTERFERENCE,
+            base_operation_time=base_operation_time,
+        )
+        self._step_xyz = step_xyz
+        self._z = z
+
+        with open(cost_table_path, "rb") as f:
+            cost_data = pickle.load(f)
+        self.left_cost_table: Dict[str, float] = cost_data["left_cost_table"]
+        self.right_cost_table: Dict[str, float] = cost_data["right_cost_table"]
+
+    def _snap_key(self, x: float, y: float, z: float) -> str:
+        """将坐标对齐到 cost table 网格步长并生成查询 key。"""
+        s = self._step_xyz
+        xs = round(round(x / s) * s, 3)
+        ys = round(round(y / s) * s, 3)
+        zs = round(round(z / s) * s, 3)
+        return f"{xs:.3f}_{ys:.3f}_{zs:.3f}"
+
+    def _lookup_cost(self, point_xy: np.ndarray, arm: str) -> Optional[float]:
+        """
+        从 cost table 查找单程运动代价。
+        返回 None 表示该臂不可达此点。直接用网格 key 查值，不做插值。
+        """
+        key = self._snap_key(float(point_xy[0]), float(point_xy[1]), self._z)
+        table = self.left_cost_table if arm == "L" else self.right_cost_table
+        return table.get(key, None)
+
+    def _compute_processing_time(self, point: np.ndarray, arm: str) -> Optional[float]:
+        """处理时间 = 2 * cost_table 单程代价 + 固定处理时间。返回 None 表示该臂不可达。"""
+        one_way_cost = self._lookup_cost(point, arm)
+        if one_way_cost is None:
+            return None
+        return 2.0 * one_way_cost + self.base_operation_time
+
+    def create_task_dataset(self, points_per_region: Dict[str, int]) -> pd.DataFrame:
+        """
+        在 cost table 离散网格点中采样任务（不做插值）：
+          - 遍历 cost table 的 key，筛选落在各正方形区域内、z 匹配的 key
+          - 从候选 key 中随机抽取 num_points 个（不放回）
+          - 非干涉区：accessible_by 强制为主负责臂（保守安全）
+          - 干涉区：accessible_by 取决于 cost table 实际可达性（方案 A）
+        """
+        # 合并左右表的所有 key，覆盖两臂各自的可达范围
+        all_keys = set(self.left_cost_table.keys()) | set(self.right_cost_table.keys())
+        half_step = self._step_xyz / 2.0
+
+        task_data = []
+        for region in self.regions:
+            cx, cy = region["center"]
+            w, h = region["width"], region["height"]
+            name = region["name"]
+            num_points = points_per_region.get(name, 5)
+
+            x_lo, x_hi = cx - w / 2, cx + w / 2
+            y_lo, y_hi = cy - h / 2, cy + h / 2
+
+            # 筛选在本区域内且 z 匹配的 grid 点
+            candidate_keys = []
+            for key in all_keys:
+                parts = key.split("_")
+                x_k, y_k, z_k = float(parts[0]), float(parts[1]), float(parts[2])
+                if (x_lo <= x_k <= x_hi and y_lo <= y_k <= y_hi
+                        and abs(z_k - self._z) < half_step):
+                    candidate_keys.append(key)
+
+            if not candidate_keys:
+                print(f"Warning: No cost table grid points found in region {name}")
+                continue
+
+            n_sample = min(num_points, len(candidate_keys))
+            chosen_indices = np.random.choice(len(candidate_keys), size=n_sample, replace=False)
+
+            is_interference = name in self.interference_regions
+            primary_arm = self._REGION_PRIMARY_ARM.get(name)  # None for interference regions
+
+            for idx in chosen_indices:
+                key = candidate_keys[idx]
+                parts = key.split("_")
+                x_k, y_k = float(parts[0]), float(parts[1])
+                pt = np.array([x_k, y_k])
+
+                if not is_interference:
+                    # 非干涉区：强制只允许主负责臂（保守安全策略）
+                    t_primary = self._compute_processing_time(pt, primary_arm)
+                    if t_primary is None:
+                        continue  # 主臂不可达此点，跳过
+                    accessible_by = [primary_arm]
+                    time_L = t_primary if primary_arm == "L" else None
+                    time_R = t_primary if primary_arm == "R" else None
+                else:
+                    # 干涉区：使用 cost table 真实可达性（方案 A）
+                    time_L = self._compute_processing_time(pt, "L")
+                    time_R = self._compute_processing_time(pt, "R")
+                    accessible_by = []
+                    if time_L is not None:
+                        accessible_by.append("L")
+                    if time_R is not None:
+                        accessible_by.append("R")
+                    if not accessible_by:
+                        continue  # 双臂均不可达，跳过
+
+                task_data.append({
+                    "region": name,
+                    "x": float(x_k),
+                    "y": float(y_k),
+                    "accessible_by": accessible_by,
+                    "time_to_L": time_L,
+                    "time_to_R": time_R,
+                })
+
+        self.task_df = pd.DataFrame(task_data)
+        self._extract_milp_parameters()
+        return self.task_df
+
+
+# =========================================================
+# 向后兼容别名
+# =========================================================
+# DualArmPlanner 原先指向单一类，现在等同于 BaselinePlanner。
+# 已有脚本中的 from dual_arm_planner import DualArmPlanner 无需修改。
+DualArmPlanner = BaselinePlanner

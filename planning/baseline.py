@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from dual_arm_planner import DualArmPlanner
+from dual_arm_planner import BaselinePlanner, RealCostPlanner, DualArmPlanner
 import os
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 import numpy as np
@@ -167,19 +167,63 @@ def example_analyze_multiple_scenarios():
     return results
 
 
+# 示例 4：Real Cost 模式 — 从 cost table 离散网格采样（真实 IK 代价）
+def example_with_real_cost(cost_table_path: str):
+    """
+    Real Cost 模式示例：
+    - 保留 B1~B6 正方形区域（保守安全几何假设不变）
+    - 处理时间从 cost table 查值（真实 IK 代价），替代欧式距离近似
+    - 任务点在 cost table 离散网格中采样（不做插值）
+    - 非干涉区 (B1/B3/B4/B6)：强制只允许主负责臂（保守安全策略）
+    - 干涉区 (B2/B5)：根据 cost table 实际可达性分配
+    - 热启动、启发式、MILP、可视化等所有核心模块与 Baseline 模式完全共用
+    """
+    print("\n=== Example 4: Real Cost Mode (cost table lookup + discrete grid sampling) ===")
+    np.random.seed(42)
+
+    optimizer = RealCostPlanner(
+        cost_table_path=cost_table_path,
+        # L_base 和 R_base 应与 build_roi_table.py 中的真实基座位置一致
+        # L_base=np.array([0.10866, 0.0]),
+        # R_base=np.array([-0.45806, 0.0]),
+    )
+
+    points_per_region = {
+        "B1": 5, "B2": 4, "B3": 5,
+        "B4": 5, "B5": 4, "B6": 5,
+    }
+
+    task_df = optimizer.create_task_dataset(points_per_region)
+    print(f"Created {len(task_df)} tasks from cost table grid")
+    print(task_df.head())
+
+    print("\n=== Running optimization ===")
+    heuristic_actions, milp_actions, improvement = optimizer.solve_optimization(
+        time_limit=20,
+        heuristic_name="spatial_order",
+    )
+
+    optimizer.save_results(os.path.join(SCRIPT_DIR, "results", "example4_realcost_results"))
+    return optimizer
+
+
 if __name__ == "__main__":
     # 运行示例
     print("Dual-Arm Harvesting Optimizer Examples")
     print("=" * 50)
     
-    # 示例 1：随机生成任务位置
+    # 示例 1：Baseline 模式 — 随机生成任务位置（欧式距离近似处理时间）
     optimizer1 = example_with_random_tasks()
     
-    # 示例 2：自定义任务位置
+    # 示例 2：Baseline 模式 — 自定义任务位置
     # optimizer2 = example_with_custom_tasks()
     
-    # 示例 3：多场景分析
+    # 示例 3：Baseline 模式 — 多场景分析
     # scenario_results = example_analyze_multiple_scenarios()
+
+    # 示例 4：Real Cost 模式 — 从 cost table 离散网格采样
+    # 取消注释并修改路径后即可运行：
+    # optimizer4 = example_with_real_cost(cost_table_path="roi/results/dual_arm_cost.pkl")
     
     print("\n" + "=" * 50)
     print("All examples completed! Check the result directories for outputs.")
