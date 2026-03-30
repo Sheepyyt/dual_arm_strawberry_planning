@@ -32,12 +32,12 @@ class DualArmPlanner:
         # 如果不传入参数，则使用默认的 B1-B6 六个区域
         if regions_config is None:
             self.regions = [
-                {"center": (-0.4, 0.5), "width": 0.4, "height": 0.4, "name": "B1", "arm_access": ["L"]},
-                {"center": ( 0.0, 0.5), "width": 0.4, "height": 0.4, "name": "B2", "arm_access": ["L", "R"]},
-                {"center": ( 0.4, 0.5), "width": 0.4, "height": 0.4, "name": "B3", "arm_access": ["R"]},
-                {"center": (-0.4,-0.5), "width": 0.4, "height": 0.4, "name": "B4", "arm_access": ["L"]},
-                {"center": ( 0.0,-0.5), "width": 0.4, "height": 0.4, "name": "B5", "arm_access": ["L", "R"]},
-                {"center": ( 0.4,-0.5), "width": 0.4, "height": 0.4, "name": "B6", "arm_access": ["R"]},
+                {"center": (-0.3, 0.45), "width": 0.3, "height": 0.3, "name": "B1", "arm_access": ["L"]},
+                {"center": ( 0.0, 0.45), "width": 0.3, "height": 0.3, "name": "B2", "arm_access": ["L", "R"]},
+                {"center": ( 0.3, 0.45), "width": 0.3, "height": 0.3, "name": "B3", "arm_access": ["R"]},
+                {"center": (-0.3,-0.45), "width": 0.3, "height": 0.3, "name": "B4", "arm_access": ["L"]},
+                {"center": ( 0.0,-0.45), "width": 0.3, "height": 0.3, "name": "B5", "arm_access": ["L", "R"]},
+                {"center": ( 0.3,-0.45), "width": 0.3, "height": 0.3, "name": "B6", "arm_access": ["R"]},
             ]
         else:
             self.regions = regions_config   # 如果传入了参数，则使用自定义区域配置

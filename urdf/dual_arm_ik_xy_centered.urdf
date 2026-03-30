@@ -1,0 +1,176 @@
+<robot name="berrybolter_dual_arm_minimal">
+  <link name="vehicle_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.60 0.50 0.10"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.60 0.50 0.10"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="left_arm_base_link"/>
+  <link name="left_arm_link1"/>
+  <link name="left_arm_link2"/>
+  <link name="left_arm_link3"/>
+  <link name="left_arm_link4"/>
+  <link name="left_arm_link5"/>
+  <link name="left_arm_link6"/>
+  <link name="left_arm_link7"/>
+  <link name="left_arm_ee_link"/>
+
+  <link name="right_arm_base_link"/>
+  <link name="right_arm_link1"/>
+  <link name="right_arm_link2"/>
+  <link name="right_arm_link3"/>
+  <link name="right_arm_link4"/>
+  <link name="right_arm_link5"/>
+  <link name="right_arm_link6"/>
+  <link name="right_arm_link7"/>
+  <link name="right_arm_ee_link"/>
+
+  <joint name="vehicle_to_left_arm" type="fixed">
+    <parent link="vehicle_link"/>
+    <child link="left_arm_base_link"/>
+    <origin xyz="0.28336 0.22875 0.27926" rpy="0 0 -3.141592653589793"/>
+  </joint>
+
+  <joint name="left_arm_joint1" type="prismatic">
+    <origin xyz="0 0.14775 0.015" rpy="0 0 0"/>
+    <parent link="left_arm_base_link"/>
+    <child link="left_arm_link1"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.01" upper="0.2" effort="0" velocity="0"/>
+  </joint>
+
+  <joint name="left_arm_joint2" type="revolute">
+    <origin xyz="0 -0.01 0" rpy="0 0 0"/>
+    <parent link="left_arm_link1"/>
+    <child link="left_arm_link2"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-6.28" upper="6.28" effort="100" velocity="100"/>
+  </joint>
+
+  <joint name="left_arm_joint3" type="prismatic">
+    <origin xyz="0.09 -0.0090742 0.15096" rpy="0 0 0"/>
+    <parent link="left_arm_link2"/>
+    <child link="left_arm_link3"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="0.01" upper="0.45" effort="100" velocity="100"/>
+  </joint>
+
+  <joint name="left_arm_joint4" type="revolute">
+    <origin xyz="0.044 -0.0011758 -0.043462" rpy="-3.141592653589793 0 1.666"/>
+    <parent link="left_arm_link3"/>
+    <child link="left_arm_link4"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-3.14" upper="-0.01" effort="100" velocity="100"/>
+  </joint>
+
+  <joint name="left_arm_joint5" type="revolute">
+    <origin xyz="0.17 0 0.013" rpy="-3.141592653589793 0 2.3966"/>
+    <parent link="left_arm_link4"/>
+    <child link="left_arm_link5"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-4.8" upper="-0.01" effort="100" velocity="100"/>
+  </joint>
+
+  <joint name="left_arm_joint6" type="revolute">
+    <origin xyz="0.15961 0.00055813 -0.031456" rpy="0 0 1.9687"/>
+    <parent link="left_arm_link5"/>
+    <child link="left_arm_link6"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.869" upper="-0.01" effort="100" velocity="100"/>
+  </joint>
+
+  <joint name="left_arm_joint7" type="revolute">
+    <origin xyz="0.074633 -0.00014535 -0.038644" rpy="-1.570796326794897 0 -1.570796326794897"/>
+    <parent link="left_arm_link6"/>
+    <child link="left_arm_link7"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="100"/>
+  </joint>
+
+  <joint name="left_arm_ee_joint" type="fixed">
+    <origin xyz="5.31363646517069E-05 -0.000500000000002027 0.0665000000000101" rpy="0 0 0"/>
+    <parent link="left_arm_link7"/>
+    <child link="left_arm_ee_link"/>
+    <axis xyz="0 0 0"/>
+    <limit lower="0" upper="0" effort="0" velocity="0"/>
+  </joint>
+
+  <joint name="vehicle_to_right_arm" type="fixed">
+    <parent link="vehicle_link"/>
+    <child link="right_arm_base_link"/>
+    <origin xyz="-0.28336 -0.22875 0.3126" rpy="0 0 0"/>
+  </joint>
+
+  <joint name="right_arm_joint1" type="prismatic">
+    <origin xyz="0 0.14775 0.015" rpy="0 0 0"/>
+    <parent link="right_arm_base_link"/>
+    <child link="right_arm_link1"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.01" upper="0.2" effort="0" velocity="0"/>
+  </joint>
+
+  <joint name="right_arm_joint2" type="revolute">
+    <origin xyz="0 -0.01 0" rpy="0 0 0"/>
+    <parent link="right_arm_link1"/>
+    <child link="right_arm_link2"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-6.28" upper="6.28" effort="100" velocity="100"/>
+  </joint>
+
+  <joint name="right_arm_joint3" type="prismatic">
+    <origin xyz="0.09 -0.0090742 0.15096" rpy="0 0 0"/>
+    <parent link="right_arm_link2"/>
+    <child link="right_arm_link3"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="0.01" upper="0.45" effort="100" velocity="100"/>
+  </joint>
+
+  <joint name="right_arm_joint4" type="revolute">
+    <origin xyz="0.044 -0.0011758 -0.043462" rpy="-3.141592653589793 0 1.666"/>
+    <parent link="right_arm_link3"/>
+    <child link="right_arm_link4"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-3.14" upper="-0.01" effort="100" velocity="100"/>
+  </joint>
+
+  <joint name="right_arm_joint5" type="revolute">
+    <origin xyz="0.17 0 0.013" rpy="-3.141592653589793 0 2.3966"/>
+    <parent link="right_arm_link4"/>
+    <child link="right_arm_link5"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-4.8" upper="-0.01" effort="100" velocity="100"/>
+  </joint>
+
+  <joint name="right_arm_joint6" type="revolute">
+    <origin xyz="0.15961 0.00055813 -0.031456" rpy="0 0 1.9687"/>
+    <parent link="right_arm_link5"/>
+    <child link="right_arm_link6"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.869" upper="-0.01" effort="100" velocity="100"/>
+  </joint>
+
+  <joint name="right_arm_joint7" type="revolute">
+    <origin xyz="0.074633 -0.00014535 -0.038644" rpy="-1.570796326794897 0 -1.570796326794897"/>
+    <parent link="right_arm_link6"/>
+    <child link="right_arm_link7"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="100"/>
+  </joint>
+
+  <joint name="right_arm_ee_joint" type="fixed">
+    <origin xyz="5.31363646517069E-05 -0.000500000000002027 0.0665000000000101" rpy="0 0 0"/>
+    <parent link="right_arm_link7"/>
+    <child link="right_arm_ee_link"/>
+    <axis xyz="0 0 0"/>
+    <limit lower="0" upper="0" effort="0" velocity="0"/>
+  </joint>
+</robot>

@@ -12,7 +12,7 @@ from tracikpy import TracIKSolver
 # =========================================================
 CONFIG = {
     # ---------- file ----------
-    "urdf_path": os.path.join(os.path.dirname(os.path.abspath(__file__)), "../urdf/dual_arm_ik.urdf"),
+    "urdf_path": os.path.join(os.path.dirname(os.path.abspath(__file__)), "../urdf/dual_arm_ik_xy_centered.urdf"),
 
     # ---------- IK chain ----------
     # 用左臂链做 IK；右臂与左臂结构相同，只是基座位姿不同
@@ -33,7 +33,7 @@ CONFIG = {
     # ---------- speed / quality ----------
     "dist_eps": 0.001,
 
-    "timeout": 0.10,
+    "timeout": 0.02,
     "step_xyz": 0.02,
     "step_yaw": 0.50,
 
@@ -48,17 +48,17 @@ CONFIG = {
 
     # ---------- scan region in VEHICLE frame ----------
     # 注意：这里扫的是“车体两侧的草莓可能区域”，不是车体中间
-    # x 方向：沿车前后方向
-    "x_min": -0.65,
-    "x_max": 0.30,
+    # x 方向：沿车前后方向；扩大至覆盖所有 B1-B6 区域（B3/B6 x_max ≈ 0.60）
+    "x_min": -0.50,
+    "x_max": 0.50,
 
-    # 左侧果实带（vehicle +y 一侧）
-    "left_side_y_min": 0.30,
-    "left_side_y_max": 0.60,
+    # 左侧果实带（vehicle +y 一侧）；扩大至覆盖 B1/B2/B3 y_max ≈ 0.70
+    "left_side_y_min": 0.25,
+    "left_side_y_max": 0.65,
 
-    # 右侧果实带（vehicle -y 一侧）
-    "right_side_y_min": -0.60,
-    "right_side_y_max": -0.30,
+    # 右侧果实带（vehicle -y 一侧）；扩大至覆盖 B4/B5/B6 y_min ≈ -0.70
+    "right_side_y_min": -0.65,
+    "right_side_y_max": -0.25,
 
     # 这是 vehicle frame 的 z，不是 arm local z
     # z：先只扫一个切片，方便快速调试，先把果实高度抬到比两臂基座高约 0.25~0.30m 的位置
