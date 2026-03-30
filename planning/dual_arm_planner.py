@@ -294,7 +294,10 @@ class DualArmPlannerCore(ABC):
         for idx, row in self.task_df.iterrows():
             task_id = f"t{idx}"
             if task_id not in scheduled_tasks:
-                arm = row["accessible_by"][0]
+                accessible = row["accessible_by"]
+                if not accessible:
+                    continue  # 无臂可达，跳过（不应出现，由 create_task_dataset 过滤）
+                arm = accessible[0]
                 region = row["region"]
                 if region in self.interference_regions:
                     actual_start = max(arm_times[arm], region_busy_until.get(region, 0.0))
