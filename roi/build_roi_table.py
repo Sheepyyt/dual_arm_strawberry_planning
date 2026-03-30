@@ -33,7 +33,7 @@ CONFIG = {
     # ---------- speed / quality ----------
     "dist_eps": 0.001,
 
-    "timeout": 0.10,
+    "timeout": 0.02,
     "step_xyz": 0.02,
     "step_yaw": 0.50,
 
