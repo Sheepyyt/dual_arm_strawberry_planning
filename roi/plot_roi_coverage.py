@@ -28,12 +28,12 @@ PLOT_CONFIG = {
 
 # B1-B6 规划区域定义（与 dual_arm_planner.py 中的默认区域保持一致）
 PLANNING_REGIONS = [
-    {"name": "B1", "cx": -0.3, "cy":  0.45, "w": 0.3, "h": 0.3, "arm": "R-only"},
+    {"name": "B1", "cx": -0.3, "cy":  0.45, "w": 0.3, "h": 0.3, "arm": "L-only"},
     {"name": "B2", "cx":  0.0, "cy":  0.45, "w": 0.3, "h": 0.3, "arm": "Interference"},
-    {"name": "B3", "cx":  0.3, "cy":  0.45, "w": 0.3, "h": 0.3, "arm": "L-only"},
-    {"name": "B4", "cx": -0.3, "cy": -0.45, "w": 0.3, "h": 0.3, "arm": "R-only"},
+    {"name": "B3", "cx":  0.3, "cy":  0.45, "w": 0.3, "h": 0.3, "arm": "R-only"},
+    {"name": "B4", "cx": -0.3, "cy": -0.45, "w": 0.3, "h": 0.3, "arm": "L-only"},
     {"name": "B5", "cx":  0.0, "cy": -0.45, "w": 0.3, "h": 0.3, "arm": "Interference"},
-    {"name": "B6", "cx":  0.3, "cy": -0.45, "w": 0.3, "h": 0.3, "arm": "L-only"},
+    {"name": "B6", "cx":  0.3, "cy": -0.45, "w": 0.3, "h": 0.3, "arm": "R-only"},
 ]
 
 
