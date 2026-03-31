@@ -883,8 +883,7 @@ class DualArmPlannerCore:
             "region_colors": self.colors
         }
         with open(os.path.join(config_dir, 'experiment_config.json'), 'w') as f:
-            import json as _json
-            _json.dump(config, f, indent=2)
+            json.dump(config, f, indent=2)
 
     def _save_comprehensive_summary(self, base_dir: str,
                                     heuristic_makespan: float,
