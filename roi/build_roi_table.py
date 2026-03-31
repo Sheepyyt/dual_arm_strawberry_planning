@@ -3,7 +3,6 @@ import os
 import pickle
 import xml.etree.ElementTree as ET
 import numpy as np
-from tracikpy import TracIKSolver
 
 
 # =========================================================
@@ -284,6 +283,13 @@ def solve_one_arm_for_vehicle_point(
 # ROI generation in VEHICLE frame
 # =========================================================
 def generate_dual_arm_roi_table(cfg):
+    try:
+        from tracikpy import TracIKSolver
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "tracikpy is required to build ROI tables. Install dependency/tracikpy or use the bundled prebuilt module."
+        ) from exc
+
     x_range, y_left, y_right, z_range, yaw_range = build_ranges(cfg)
 
     solver = TracIKSolver(
@@ -353,11 +359,11 @@ def generate_dual_arm_roi_table(cfg):
     roi_payload = {
         "data": roi,
         "ranges": {
-            "x": x_range,
-            "y_left": y_left,
-            "y_right": y_right,
-            "z": z_range,
-            "yaw": yaw_range,
+            "x": x_range.tolist(),
+            "y_left": y_left.tolist(),
+            "y_right": y_right.tolist(),
+            "z": z_range.tolist(),
+            "yaw": yaw_range.tolist(),
         },
         "meta": {
             "frame": "vehicle_frame",
