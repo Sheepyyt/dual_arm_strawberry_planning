@@ -78,34 +78,34 @@ def example_real_cost_specified():
 
     planner = RealCostPlanner()
 
-    # 手动指定任务位置（必须是 cost table 中存在或可被舍入到网格的坐标）
+    # 手动指定任务位置（必须是 cost table 网格点：step=0.02m，z=0.560）
     # B1/B4：L-only；B3/B6：R-only；B2/B5：按 cost table 实际可达性
     task_locations = [
         # B1 任务（仅左臂）
-        {"x": -0.40, "y": 0.30, "region": "B1"},
-        {"x": -0.30, "y": 0.50, "region": "B1"},
-        {"x": -0.20, "y": 0.40, "region": "B1"},
+        {"x": -0.40, "y": 0.31, "region": "B1"},
+        {"x": -0.30, "y": 0.49, "region": "B1"},
+        {"x": -0.20, "y": 0.55, "region": "B1"},
 
         # B2 任务（干涉区，按点可达性决定）
-        {"x":  0.00, "y": 0.40, "region": "B2"},
-        {"x":  0.10, "y": 0.50, "region": "B2"},
-        {"x": -0.10, "y": 0.60, "region": "B2"},
+        {"x":  0.06, "y": 0.43, "region": "B2"},
+        {"x": -0.10, "y": 0.59, "region": "B2"},
+        {"x":  0.12, "y": 0.57, "region": "B2"},
 
         # B3 任务（仅右臂）
-        {"x":  0.20, "y": 0.30, "region": "B3"},
-        {"x":  0.30, "y": 0.50, "region": "B3"},
+        {"x":  0.24, "y": 0.57, "region": "B3"},
+        {"x":  0.16, "y": 0.53, "region": "B3"},
 
         # B4 任务（仅左臂）
-        {"x": -0.40, "y": -0.30, "region": "B4"},
-        {"x": -0.20, "y": -0.50, "region": "B4"},
+        {"x": -0.24, "y": -0.57, "region": "B4"},
+        {"x": -0.18, "y": -0.53, "region": "B4"},
 
         # B5 任务（干涉区）
-        {"x":  0.00, "y": -0.40, "region": "B5"},
-        {"x":  0.10, "y": -0.50, "region": "B5"},
+        {"x":  0.08, "y": -0.39, "region": "B5"},
+        {"x": -0.12, "y": -0.57, "region": "B5"},
 
         # B6 任务（仅右臂）
-        {"x":  0.20, "y": -0.30, "region": "B6"},
-        {"x":  0.30, "y": -0.50, "region": "B6"},
+        {"x":  0.16, "y": -0.53, "region": "B6"},
+        {"x":  0.18, "y": -0.57, "region": "B6"},
     ]
 
     task_df = planner.load_task_locations(task_locations)
