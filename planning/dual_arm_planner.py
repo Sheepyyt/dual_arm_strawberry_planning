@@ -5,47 +5,49 @@ import pandas as pd
 import gurobipy as gp
 from gurobipy import GRB
 import os
+import pickle
 import time
+import xml.etree.ElementTree as ET
 from typing import List, Dict, Tuple, Optional, Union
 
+# Module-level paths (resolved at import time relative to this file)
+_PLANNING_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_PLANNING_DIR)
 
-class DualArmPlanner:
-    
+
+class DualArmPlannerCore:
+    """
+    双臂采摘规划器的抽象基类。
+    封装所有通用逻辑（MILP 建模、启发式、热启动、可视化等）。
+    子类须实现 _compute_processing_time()，并可覆盖 create_task_dataset()/_configure_axes()。
+    """
+
     # 初始化函数，设置机械臂位置、区域配置（包括区域中心、大小、各臂可达性）、采摘时间模型参数等
-    def __init__(self, 
-                 L_base: np.ndarray = np.array([-0.3, 0]), 
-                 R_base: np.ndarray = np.array([0.3, 0]),
-                 regions_config: Optional[List[Dict]] = None,
+    def __init__(self,
+                 L_base: np.ndarray,
+                 R_base: np.ndarray,
+                 regions_config: List[Dict],
                  base_operation_time: float = 0.0):
         """
-                参数:
-                 L_base: 左臂基座位置 (x, y)
-                 R_base: 右臂基座位置 (x, y)
-                 regions_config: 采摘区域配置。
-                 base_operation_time: 单个草莓的固定处理时间（包括采摘、放置等）。
+        参数:
+            L_base: 左臂基座位置 (x, y)
+            R_base: 右臂基座位置 (x, y)
+            regions_config: 采摘区域配置列表（每项含 center/width/height/name/arm_access）。
+            base_operation_time: 单个草莓的固定处理时间（包括采摘、放置等）。
         """
-
         self.L_base = L_base
         self.R_base = R_base
         self.base_operation_time = base_operation_time
+        self.regions = regions_config
 
-        # 如果不传入参数，则使用默认的 B1-B6 六个区域
-        if regions_config is None:
-            self.regions = [
-                {"center": (-0.3, 0.45), "width": 0.3, "height": 0.3, "name": "B1", "arm_access": ["L"]},
-                {"center": ( 0.0, 0.45), "width": 0.3, "height": 0.3, "name": "B2", "arm_access": ["L", "R"]},
-                {"center": ( 0.3, 0.45), "width": 0.3, "height": 0.3, "name": "B3", "arm_access": ["R"]},
-                {"center": (-0.3,-0.45), "width": 0.3, "height": 0.3, "name": "B4", "arm_access": ["L"]},
-                {"center": ( 0.0,-0.45), "width": 0.3, "height": 0.3, "name": "B5", "arm_access": ["L", "R"]},
-                {"center": ( 0.3,-0.45), "width": 0.3, "height": 0.3, "name": "B6", "arm_access": ["R"]},
-            ]
-        else:
-            self.regions = regions_config   # 如果传入了参数，则使用自定义区域配置
-            
         # 可视化的区域颜色
         self.colors = ["red", "orange", "green", "blue", "purple", "brown"]
         self.interference_regions = ["B2", "B5"]
-        
+
+        # 启发式臂访问顺序（子类可覆盖）
+        self._left_arm_region_order: List[str] = ['B2', 'B1', 'B4']
+        self._right_arm_region_order: List[str] = ['B5', 'B6', 'B3']
+
         # 数据存储
         self.task_df = None
         self.milp_params = None
@@ -140,26 +142,23 @@ class DualArmPlanner:
         return self.task_df
 
 
-    # 计算单个草莓的处理时间
+    # 计算单个草莓的处理时间（子类必须实现）
     def _compute_processing_time(self, point: np.ndarray, arm: str) -> float:
         """
         计算采摘时间：2 * 单程移动时间 + 固定处理时间。
-        单程移动时间在此处用欧式距离近似。
+        子类须实现此方法，提供具体的单程代价计算方式。
         参数:
             point: 草莓位置 [x, y]
             arm: 'L' 或 'R'
         """
-        if arm == "L":
-            base = self.L_base
-        else:
-            base = self.R_base
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement _compute_processing_time(point, arm)."
+        )
 
-        # 计算单程移动时间（基座到草莓的欧式距离近似）
-        one_way_time = float(np.linalg.norm(point - base))
-        
-        # 返回总处理时间：2 * 单程移动时间 + 固定处理时间
-        total_time = 2 * one_way_time + self.base_operation_time
-        return total_time
+    # 可视化坐标轴定制钩子（子类可覆盖）
+    def _configure_axes(self, ax) -> None:
+        """子类可覆盖此方法以定制空间可视化坐标轴（如翻转 x 轴方向）。"""
+        pass
 
     # 从 task_df 中提取 MILP 所需的参数
     def _extract_milp_parameters(self):
@@ -244,8 +243,7 @@ class DualArmPlanner:
     def spatial_order_heuristic(self) -> List[Dict]:
         """
         基于区域的空间顺序启发式算法。
-        左臂: B2 → B1 → B4 (先干涉区域，然后是自己的区域)
-        右臂: B5 → B6 → B3 (先干涉区域，然后是自己的区域)
+        臂访问顺序由 self._left_arm_region_order / self._right_arm_region_order 决定。
         """
         if self.task_df is None:
             raise ValueError("No task data loaded.")
@@ -254,9 +252,9 @@ class DualArmPlanner:
         arm_times = {'L': 0.0, 'R': 0.0}
         region_busy_until = {'B2': 0.0, 'B5': 0.0}
         
-        # 更新序列：每个手臂优先处理其干涉区域
-        left_arm_order = ['B2', 'B1', 'B4']   # 左臂：干涉区 B2，然后是仅左臂区域
-        right_arm_order = ['B5', 'B6', 'B3']  # 右臂：干涉区 B5，然后是仅右臂区域 
+        # 使用子类设定的启发式区域访问顺序
+        left_arm_order = self._left_arm_region_order
+        right_arm_order = self._right_arm_region_order
                 
         # 处理单个区域的核心调度器：负责规划某一只手臂在某一个具体区域内的所有动作
         def schedule_region_tasks(arm, region, start_time):
@@ -300,7 +298,7 @@ class DualArmPlanner:
         
         # 左臂调度流程
         left_time = arm_times['L']
-        print("Left arm sequence: B2 -> B1 -> B4")
+        print(f"Left arm sequence: {' -> '.join(left_arm_order)}")
         for region in left_arm_order:
             region_actions, left_time = schedule_region_tasks('L', region, left_time)
             actions.extend(region_actions)
@@ -308,13 +306,36 @@ class DualArmPlanner:
         
         # 右臂调度流程
         right_time = arm_times['R']
-        print("Right arm sequence: B5 -> B6 -> B3")
+        print(f"Right arm sequence: {' -> '.join(right_arm_order)}")
         for region in right_arm_order:
             region_actions, right_time = schedule_region_tasks('R', region, right_time)
             actions.extend(region_actions)
             arm_times['R'] = right_time
+
+        # 兜底：处理任何未被调度的任务（如干涉区内仅单臂可达的点）
+        scheduled_ids = {a['task'] for a in actions}
+        for idx, row in self.task_df.iterrows():
+            task_id = f"t{idx}"
+            if task_id in scheduled_ids:
+                continue
+            # 分配给第一个可达的臂
+            arm = row['accessible_by'][0]
+            proc_time = row[f'time_to_{arm}']
+            region = row['region']
+            start = arm_times[arm]
+            if region in self.interference_regions:
+                start = max(start, region_busy_until[region])
+                region_busy_until[region] = start + proc_time
+            end = start + proc_time
+            actions.append({
+                "task": task_id, "arm": arm,
+                "x": row["x"], "y": row["y"],
+                "start": start, "end": end
+            })
+            arm_times[arm] = end
         
         return sorted(actions, key=lambda x: x["start"])
+
 
     # 把 MILP 约束翻译成 Gurobi 能理解的形式
     def build_milp_model(self, warm_start_actions: Optional[List[Dict]] = None) -> gp.Model:
@@ -683,6 +704,7 @@ class DualArmPlanner:
         ax.set_aspect('equal')
         ax.grid(True)
         ax.set_title(title)
+        self._configure_axes(ax)
         
         # 初始化任务点
         task_points = {}
@@ -990,6 +1012,7 @@ class DualArmPlanner:
         ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax2.grid(True, alpha=0.3)
         ax2.set_aspect('equal')
+        self._configure_axes(ax2)
         
         plt.tight_layout()
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -1253,3 +1276,241 @@ class DualArmPlanner:
         plt.savefig(os.path.join(analysis_dir, 'performance_comparison.png'), 
                    dpi=300, bbox_inches='tight')
         plt.close(fig)
+
+# =============================================================================
+# BaselinePlanner: 手工基座 + 欧式距离代价
+# =============================================================================
+
+class BaselinePlanner(DualArmPlannerCore):
+    """
+    Baseline 模式规划器。
+    - 机械臂基座：手工固定值，L=(-0.3, 0)，R=(+0.3, 0)。
+    - 单程移动时间：基座到草莓的欧式距离近似。
+    - 草莓采样：在各区域矩形范围内连续随机采样。
+    - B1/B4 仅左臂，B3/B6 仅右臂，B2/B5 双臂干涉区。
+    """
+
+    _DEFAULT_L_BASE = np.array([-0.3, 0.0])
+    _DEFAULT_R_BASE = np.array([ 0.3, 0.0])
+    _DEFAULT_REGIONS: List[Dict] = [
+        {"center": (-0.3,  0.45), "width": 0.3, "height": 0.3, "name": "B1", "arm_access": ["L"]},
+        {"center": ( 0.0,  0.45), "width": 0.3, "height": 0.3, "name": "B2", "arm_access": ["L", "R"]},
+        {"center": ( 0.3,  0.45), "width": 0.3, "height": 0.3, "name": "B3", "arm_access": ["R"]},
+        {"center": (-0.3, -0.45), "width": 0.3, "height": 0.3, "name": "B4", "arm_access": ["L"]},
+        {"center": ( 0.0, -0.45), "width": 0.3, "height": 0.3, "name": "B5", "arm_access": ["L", "R"]},
+        {"center": ( 0.3, -0.45), "width": 0.3, "height": 0.3, "name": "B6", "arm_access": ["R"]},
+    ]
+
+    def __init__(self,
+                 L_base: Optional[np.ndarray] = None,
+                 R_base: Optional[np.ndarray] = None,
+                 regions_config: Optional[List[Dict]] = None,
+                 base_operation_time: float = 0.0):
+        if L_base is None:
+            L_base = self._DEFAULT_L_BASE.copy()
+        if R_base is None:
+            R_base = self._DEFAULT_R_BASE.copy()
+        if regions_config is None:
+            regions_config = [r.copy() for r in self._DEFAULT_REGIONS]
+        super().__init__(L_base, R_base, regions_config, base_operation_time)
+        # 左臂: 干涉区 B2 → L 独占区 B1 → B4
+        # 右臂: 干涉区 B5 → R 独占区 B6 → B3
+        self._left_arm_region_order  = ['B2', 'B1', 'B4']
+        self._right_arm_region_order = ['B5', 'B6', 'B3']
+
+    def _compute_processing_time(self, point: np.ndarray, arm: str) -> float:
+        """欧式距离近似：2 * 单程距离 + 固定处理时间。"""
+        base = self.L_base if arm == 'L' else self.R_base
+        one_way_time = float(np.linalg.norm(point - base))
+        return 2.0 * one_way_time + self.base_operation_time
+
+
+# =============================================================================
+# RealCostPlanner: URDF 机械臂定义 + cost table 代价
+# =============================================================================
+
+class RealCostPlanner(DualArmPlannerCore):
+    """
+    Real Cost 模式规划器。
+    - 机械臂定义：严格来源于 dual_arm_ik_xy_centered.urdf，与 build_roi_table.py 完全一致。
+    - 单程移动时间：从 cost table（roi/results/dual_arm_cost.pkl）查表获取。
+    - 草莓采样：仅从 cost table 可达网格离散点中筛选，且必须位于 B1-B6 区域内。
+    - 区域保守策略：
+        B1/B4（负 x）：强制 R 独占（即使 L 有条目也忽略）。
+        B3/B6（正 x）：强制 L 独占（即使 R 有条目也忽略）。
+        B2/B5（干涉区）：以 cost table 中实际可达的臂为准（L-only / R-only / 双臂均可）。
+    """
+
+    # 默认文件路径（相对于本文件所在目录推导）
+    _DEFAULT_COST_TABLE: str = os.path.join(_REPO_ROOT, "roi", "results", "dual_arm_cost.pkl")
+    _DEFAULT_URDF: str       = os.path.join(_REPO_ROOT, "urdf", "dual_arm_ik_xy_centered.urdf")
+
+    # URDF 中左/右臂基座关节名（与 build_roi_table.py 完全一致）
+    _LEFT_BASE_JOINT:  str = "vehicle_to_left_arm"
+    _RIGHT_BASE_JOINT: str = "vehicle_to_right_arm"
+
+    # 当前 cost table 的扫描 z 高度（与 build_roi_table.py 中 z_min=z_max=0.56 一致）
+    _Z_SLICE: float = 0.56
+
+    # 保守的单臂区域策略：key=区域名, value=允许的臂列表
+    _SINGLE_ARM_POLICY: Dict[str, List[str]] = {
+        'B1': ['R'], 'B4': ['R'],  # 负 x 区域：R 独占
+        'B3': ['L'], 'B6': ['L'],  # 正 x 区域：L 独占
+    }
+
+    # B1-B6 几何与 Baseline 完全一致；arm_access 按 URDF 实测可达性设定
+    _REGIONS: List[Dict] = [
+        {"center": (-0.3,  0.45), "width": 0.3, "height": 0.3, "name": "B1", "arm_access": ["R"]},
+        {"center": ( 0.0,  0.45), "width": 0.3, "height": 0.3, "name": "B2", "arm_access": ["L", "R"]},
+        {"center": ( 0.3,  0.45), "width": 0.3, "height": 0.3, "name": "B3", "arm_access": ["L"]},
+        {"center": (-0.3, -0.45), "width": 0.3, "height": 0.3, "name": "B4", "arm_access": ["R"]},
+        {"center": ( 0.0, -0.45), "width": 0.3, "height": 0.3, "name": "B5", "arm_access": ["L", "R"]},
+        {"center": ( 0.3, -0.45), "width": 0.3, "height": 0.3, "name": "B6", "arm_access": ["L"]},
+    ]
+
+    def __init__(self,
+                 cost_table_path: Optional[str] = None,
+                 urdf_path: Optional[str] = None,
+                 base_operation_time: float = 0.0):
+        """
+        参数:
+            cost_table_path: dual_arm_cost.pkl 路径（None → 使用默认值）。
+            urdf_path:        dual_arm_ik_xy_centered.urdf 路径（None → 使用默认值）。
+            base_operation_time: 单草莓固定处理时间（秒）。
+        """
+        cost_table_path = cost_table_path or self._DEFAULT_COST_TABLE
+        urdf_path       = urdf_path       or self._DEFAULT_URDF
+
+        # ---- 从 cost table 加载左/右臂代价字典 ----
+        with open(cost_table_path, 'rb') as f:
+            cost_data = pickle.load(f)
+        self._left_cost_table:  Dict[str, float] = cost_data['left_cost_table']
+        self._right_cost_table: Dict[str, float] = cost_data['right_cost_table']
+
+        # ---- 从 URDF 读取基座位置（仅用于可视化绘制连线） ----
+        L_base, R_base = self._load_bases_from_urdf(
+            urdf_path, self._LEFT_BASE_JOINT, self._RIGHT_BASE_JOINT
+        )
+
+        regions = [r.copy() for r in self._REGIONS]
+        super().__init__(L_base, R_base, regions, base_operation_time)
+
+        # L 臂（正 x 侧）主导 B2 干涉区，然后访问 L 独占区 B3/B6
+        # R 臂（负 x 侧）主导 B5 干涉区，然后访问 R 独占区 B1/B4
+        self._left_arm_region_order  = ['B2', 'B3', 'B6']
+        self._right_arm_region_order = ['B5', 'B1', 'B4']
+
+    @staticmethod
+    def _load_bases_from_urdf(urdf_path: str,
+                               left_joint: str,
+                               right_joint: str) -> Tuple[np.ndarray, np.ndarray]:
+        """从 URDF 解析左/右臂基座的 (x, y) 坐标（vehicle frame）。"""
+        tree = ET.parse(urdf_path)
+        root = tree.getroot()
+
+        def joint_xy(name: str) -> np.ndarray:
+            j = root.find(f"./joint[@name='{name}']")
+            if j is None:
+                raise ValueError(f"Joint '{name}' not found in {urdf_path}")
+            origin = j.find('origin')
+            if origin is None:
+                return np.array([0.0, 0.0])
+            xyz = [float(v) for v in origin.attrib.get('xyz', '0 0 0').split()]
+            return np.array([xyz[0], xyz[1]])
+
+        return joint_xy(left_joint), joint_xy(right_joint)
+
+    def _compute_processing_time(self, point: np.ndarray, arm: str) -> float:
+        """从 cost table 查表：2 * 单程 IK 代价 + 固定处理时间。"""
+        key = f"{float(point[0]):.3f}_{float(point[1]):.3f}_{self._Z_SLICE:.3f}"
+        table = self._left_cost_table if arm == 'L' else self._right_cost_table
+        if key not in table:
+            raise KeyError(
+                f"[RealCostPlanner] 点 ({point[0]:.3f}, {point[1]:.3f}, z={self._Z_SLICE}) "
+                f"在臂 '{arm}' 的 cost table 中不可达。请使用 create_task_dataset() 从网格点采样。"
+            )
+        return 2.0 * table[key] + self.base_operation_time
+
+    def create_task_dataset(self, points_per_region: Dict[str, int]) -> pd.DataFrame:
+        """
+        仅从 cost table 可达的网格离散点中采样草莓任务。
+        采样点必须位于 B1-B6 区域矩形范围内，并遵守保守的单臂区域策略。
+        """
+        z_suffix = f"_{self._Z_SLICE:.3f}"
+        left_keys  = {k for k in self._left_cost_table  if k.endswith(z_suffix)}
+        right_keys = {k for k in self._right_cost_table if k.endswith(z_suffix)}
+        all_keys   = left_keys | right_keys
+
+        task_data: List[Dict] = []
+
+        for region in self.regions:
+            cx, cy   = region["center"]
+            w, h     = region["width"], region["height"]
+            name     = region["name"]
+            xmin, xmax = cx - w / 2, cx + w / 2
+            ymin, ymax = cy - h / 2, cy + h / 2
+            num_pts  = points_per_region.get(name, 5)
+
+            # ---- 筛选位于该区域内的网格点 ----
+            candidates: List[Tuple[str, float, float, List[str]]] = []
+            for k in all_keys:
+                parts = k.split('_')
+                x, y = float(parts[0]), float(parts[1])
+                if not (xmin <= x <= xmax and ymin <= y <= ymax):
+                    continue
+
+                l_ok = k in left_keys
+                r_ok = k in right_keys
+
+                # ---- 保守策略：单臂区域强制只允许主臂 ----
+                if name in self._SINGLE_ARM_POLICY:
+                    forced = self._SINGLE_ARM_POLICY[name]
+                    accessible_by = [a for a in forced
+                                     if (a == 'L' and l_ok) or (a == 'R' and r_ok)]
+                else:
+                    # 干涉区 B2/B5：以 cost table 实际可达性为准
+                    accessible_by = (['L'] if l_ok else []) + (['R'] if r_ok else [])
+
+                if not accessible_by:
+                    continue
+                candidates.append((k, x, y, accessible_by))
+
+            if not candidates:
+                print(f"[RealCostPlanner] 警告：区域 {name} 中没有可达的网格点，跳过。")
+                continue
+
+            # ---- 随机采样 ----
+            if len(candidates) <= num_pts:
+                sampled = candidates
+            else:
+                idxs   = np.random.choice(len(candidates), num_pts, replace=False)
+                sampled = [candidates[i] for i in idxs]
+
+            for _, x, y, accessible_by in sampled:
+                pt = np.array([x, y])
+                time_L = self._compute_processing_time(pt, 'L') if 'L' in accessible_by else None
+                time_R = self._compute_processing_time(pt, 'R') if 'R' in accessible_by else None
+                task_data.append({
+                    'region':        name,
+                    'x':             x,
+                    'y':             y,
+                    'accessible_by': accessible_by,
+                    'time_to_L':     time_L,
+                    'time_to_R':     time_R,
+                })
+
+        self.task_df = pd.DataFrame(task_data)
+        self._extract_milp_parameters()
+        return self.task_df
+
+    def _configure_axes(self, ax) -> None:
+        """翻转 x 轴，使 L 臂（URDF 正 x 侧）在画面左侧，与物理方向一致。"""
+        ax.invert_xaxis()
+
+
+# =============================================================================
+# 向后兼容别名
+# =============================================================================
+
+#: Backward-compatible alias: DualArmPlanner now refers to BaselinePlanner.
+DualArmPlanner = BaselinePlanner
