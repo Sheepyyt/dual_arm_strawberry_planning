@@ -1347,11 +1347,12 @@ class RealCostPlanner(DualArmPlannerCore):
         步骤一：预分配任务归属
           - B1/B4：全部归 L
           - B3/B6：全部归 R
-          - B2：only-L → 归 L；only-R → 归 R；both → 取代价更低一侧（tie-break: L）
-          - B5：only-L → 归 L；only-R → 归 R；both → 取代价更低一侧（tie-break: R）
-        步骤二：调度顺序
+          - B2：only-L 和 both → 归 L；only-R → 归 R
+          - B5：only-R 和 both → 归 R；only-L → 归 L
+        步骤二：调度顺序（左右臂同时从 t=0 开始工作）
           - 左臂：B2(L 分配任务) → B1 → B4 → B5(L 分配任务)
           - 右臂：B5(R 分配任务) → B6 → B3 → B2(R 分配任务)
+          两臂的区域按步交替调度，确保干涉区互斥约束正确生效。
         """
         if self.task_df is None:
             raise ValueError("No task data loaded.")
@@ -1362,30 +1363,24 @@ class RealCostPlanner(DualArmPlannerCore):
 
         # ---- 步骤一：预分配 B2 / B5 中的任务 ----
         def _preallocate(region_name: str, default_arm: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-            """返回 (分给 L 的 df，分给 R 的 df)"""
+            """
+            返回 (分给 L 的 df，分给 R 的 df)
+            B2 的 default_arm="L"：only-L 和 both 均归 L，only-R 归 R
+            B5 的 default_arm="R"：only-R 和 both 均归 R，only-L 归 L
+            """
             rdf = self.task_df[self.task_df['region'] == region_name].copy()
             l_rows, r_rows = [], []
             for idx, row in rdf.iterrows():
                 ab = row['accessible_by']
-                if ab == ["L"] or (isinstance(ab, list) and "L" in ab and "R" not in ab):
+                if isinstance(ab, list) and "L" in ab and "R" not in ab:
+                    # only-L
                     l_rows.append(idx)
-                elif ab == ["R"] or (isinstance(ab, list) and "R" in ab and "L" not in ab):
+                elif isinstance(ab, list) and "R" in ab and "L" not in ab:
+                    # only-R
                     r_rows.append(idx)
                 else:
-                    # both 可达：比较代价，tie-break 用 default_arm
-                    t_l = row['time_to_L']
-                    t_r = row['time_to_R']
-                    if t_l is not None and t_r is not None:
-                        if t_l < t_r:
-                            l_rows.append(idx)
-                        elif t_r < t_l:
-                            r_rows.append(idx)
-                        else:
-                            (l_rows if default_arm == "L" else r_rows).append(idx)
-                    elif t_l is not None:
-                        l_rows.append(idx)
-                    else:
-                        r_rows.append(idx)
+                    # both 可达：直接分给 default_arm
+                    (l_rows if default_arm == "L" else r_rows).append(idx)
             return self.task_df.loc[l_rows], self.task_df.loc[r_rows]
 
         b2_for_L, b2_for_R = _preallocate("B2", default_arm="L")
@@ -1397,32 +1392,38 @@ class RealCostPlanner(DualArmPlannerCore):
         b4_df = self.task_df[self.task_df['region'] == "B4"]
         b6_df = self.task_df[self.task_df['region'] == "B6"]
 
-        # ---- 步骤二：调度 ----
+        # ---- 步骤二：调度（交替调度左右臂，确保两臂同时从 t=0 开始）----
         print("Left arm sequence: B2(L) -> B1 -> B4 -> B5(L)")
+        print("Right arm sequence: B5(R) -> B6 -> B3 -> B2(R)")
 
-        # 左臂：B2(L 分配) → B1 → B4 → B5(L 分配)
-        for arm, region, rdf in [
+        left_schedule = [
             ('L', 'B2', b2_for_L),
             ('L', 'B1', b1_df),
             ('L', 'B4', b4_df),
             ('L', 'B5', b5_for_L),
-        ]:
-            region_actions, arm_times['L'] = self._schedule_region_df(
-                arm, region, rdf, arm_times['L'], region_busy_until)
-            actions.extend(region_actions)
-
-        print("Right arm sequence: B5(R) -> B6 -> B3 -> B2(R)")
-
-        # 右臂：B5(R 分配) → B6 → B3 → B2(R 分配)
-        for arm, region, rdf in [
+        ]
+        right_schedule = [
             ('R', 'B5', b5_for_R),
             ('R', 'B6', b6_df),
             ('R', 'B3', b3_df),
             ('R', 'B2', b2_for_R),
-        ]:
-            region_actions, arm_times['R'] = self._schedule_region_df(
-                arm, region, rdf, arm_times['R'], region_busy_until)
-            actions.extend(region_actions)
+        ]
+
+        # 交替调度：先左臂一个区域，再右臂一个区域，交替进行
+        # 这样当左臂到达 B5(L) 时，右臂的 B5(R) 已完成调度，
+        # 反之当右臂到达 B2(R) 时，左臂的 B2(L) 已完成调度。
+        n_steps = max(len(left_schedule), len(right_schedule))
+        for i in range(n_steps):
+            if i < len(left_schedule):
+                arm, region, rdf = left_schedule[i]
+                region_actions, arm_times['L'] = self._schedule_region_df(
+                    arm, region, rdf, arm_times['L'], region_busy_until)
+                actions.extend(region_actions)
+            if i < len(right_schedule):
+                arm, region, rdf = right_schedule[i]
+                region_actions, arm_times['R'] = self._schedule_region_df(
+                    arm, region, rdf, arm_times['R'], region_busy_until)
+                actions.extend(region_actions)
 
         return sorted(actions, key=lambda x: x["start"])
 
