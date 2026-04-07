@@ -36,7 +36,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from scipy.spatial import ConvexHull
+from scipy.spatial import ConvexHull, Delaunay
 
 from build_roi_table import (
     CONFIG,
@@ -103,7 +103,13 @@ def parse_arm_chain(urdf_path: str, arm_prefix: str):
         parent_map.setdefault(parent_link, []).append((joint, child_link))
 
     chain = []
+    # Start from the arm's base link (naming convention: "{arm_prefix}_base_link")
     current_link = f"{arm_prefix}_base_link"
+    if current_link not in {l.get("name") for l in root.findall("link")}:
+        raise ValueError(
+            f"Base link '{current_link}' not found in URDF. "
+            f"Available links: {[l.get('name') for l in root.findall('link')]}"
+        )
     while True:
         children = parent_map.get(current_link, [])
         # Filter to same arm
@@ -167,9 +173,10 @@ def _joint_transform(joint_desc: dict, q_val: float) -> np.ndarray:
 
     if jtype == "revolute":
         ax = joint_desc["axis"]
-        # Rodrigues for rotation about arbitrary unit axis
+        # Rodrigues formula for rotation about an arbitrary unit axis.
+        # The current URDF uses axes of the form (0,0,±1), but this
+        # implementation handles general unit axes correctly.
         angle = q_val
-        # axis is already unit (0 0 ±1) in this URDF but handle general case
         ax_norm = np.linalg.norm(ax)
         if ax_norm < 1e-12:
             return T_origin
@@ -268,9 +275,13 @@ def compute_swept_volumes(roi_payload: dict, T_left, T_right, urdf_path: str):
         ``ee_points["left"]``  → dict  region_name → ndarray (M, 3)
         ``ee_points["right"]`` → dict  region_name → ndarray (M, 3)
     """
-    # Use left_arm chain for IK solver (both arms share identical structure
-    # relative to their own base).  The ROI builder solves both arms using
-    # the left_arm IK chain by transforming targets into arm‑local frame.
+    # Both arms share identical kinematic structure (same joint types,
+    # DH parameters, and link lengths) – only the base transform differs.
+    # The ROI builder (build_roi_table.py) already exploits this symmetry
+    # by using a single left_arm IK chain for both arms, transforming
+    # targets into each arm's local frame.  We reuse the same chain here
+    # for FK; the arm‑specific base transform (T_left / T_right) converts
+    # the result back to the vehicle frame.
     chain = parse_arm_chain(urdf_path, "left_arm")
 
     roi = roi_payload["data"]
@@ -395,7 +406,6 @@ def compute_overlap_points(pts_a_2d: np.ndarray, pts_b_2d: np.ndarray,
     grid = np.array(np.meshgrid(xs, ys)).T.reshape(-1, 2)
 
     def _in_hull(pts, hull):
-        from scipy.spatial import Delaunay
         try:
             d = Delaunay(pts[hull.vertices])
             return d.find_simplex(grid) >= 0
@@ -654,7 +664,15 @@ def find_safety_boundary(
 
 
 def _inflate_polygon(verts: np.ndarray, d: float) -> np.ndarray:
-    """Inflate a convex polygon outward by distance ``d``."""
+    """Inflate a convex polygon outward by distance ``d``.
+
+    Uses a simple radial expansion from the centroid.  This is an
+    approximation that works well for roughly convex, compact shapes but
+    does **not** produce a uniformly offset polygon (Minkowski sum with a
+    disk).  For the safety‑boundary analysis the approximation is
+    conservative enough because the convex hulls are already a superset
+    of the true link volumes.
+    """
     center = verts.mean(axis=0)
     directions = verts - center
     norms = np.linalg.norm(directions, axis=1, keepdims=True)
