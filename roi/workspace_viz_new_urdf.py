@@ -10,11 +10,10 @@ workspace_viz_new_urdf.py
 
 脚本只对 **单臂** 做 FK 采样，另一臂结果通过安装位姿平移/旋转得到。
 
-输出两张图（每张 3 个子图：左臂 / 右臂 / 交集）：
-1. 末端执行器（EE）二维可达范围 + 双臂交集
-2. 全部连杆/关节的二维扫掠范围 + 双臂交集
-
-同时生成凸包版和 alpha-shape 凹边界版，共 4 张 PNG。
+输出图表：
+1. EE 可达空间（凸包 + alpha-shape 版本）
+2. 全身（All Links）可达空间
+3. **每个关节/连杆的可达区域**——用不同颜色区分各关节的覆盖范围
 """
 
 import os
@@ -32,7 +31,6 @@ from scipy.spatial import ConvexHull
 # ────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
 NEW_URDF_PATH = os.path.join(_HERE, "..", "urdf", "berrybolter_arm.urdf")
-OLD_URDF_PATH = os.path.join(_HERE, "..", "urdf", "dual_arm_ik_xy_centered.urdf")
 OUT_DIR = os.path.join(_HERE, "results")
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -381,6 +379,24 @@ def shapely_to_mpl_patch(geom, **kwargs):
 
 
 # ────────────────────────────────────────────
+# Per-joint colors (distinct for up to 10 links)
+# ────────────────────────────────────────────
+# Per-joint colors — high-contrast, saturated, carefully ordered
+# ────────────────────────────────────────────
+JOINT_COLORS = [
+    '#888888',  # base_link  (fixed) — gray
+    '#FF6600',  # link1 — orange       (joint1, prismatic)
+    '#00CC00',  # link2 — bright green  (joint2, revolute)
+    '#FF0000',  # link3 — red           (joint3, prismatic)
+    '#AA00FF',  # link4 — violet        (joint4, revolute)
+    '#00AAFF',  # link5 — sky blue      (joint5, revolute)
+    '#FF00AA',  # link6 — magenta       (joint6, revolute)
+    '#CCCC00',  # link7 — dark yellow   (joint7, revolute)
+    '#0000FF',  # ee_link (fixed) — blue
+]
+
+
+# ────────────────────────────────────────────
 # plotting
 # ────────────────────────────────────────────
 
@@ -500,133 +516,81 @@ def plot_workspace_figure(
         plt.close(fig)
 
 
-# ────────────────────────────────────────────
-# comparison figure (old vs new side by side)
-# ────────────────────────────────────────────
-
-def _add_shape_patch(ax, shape, **kwargs):
-    """Add a Shapely geometry as a matplotlib PathPatch to ax."""
-    if shape is not None:
-        patch = shapely_to_mpl_patch(shape, **kwargs)
-        if patch is not None:
-            ax.add_patch(patch)
-
-
-def plot_comparison(old_l_ee, old_r_ee, old_l_all, old_r_all,
-                    new_l_ee, new_r_ee, new_l_all, new_r_all,
-                    T_left_old, T_right_old,
-                    T_left_new, T_right_new):
+def plot_per_joint_workspace(link_names, link_pts_left, link_pts_right,
+                             T_left, T_right, chain, out_prefix):
     """
-    Old vs New comparison (2 rows x 3 cols).
-    Each subplot uses its own (old or new) base transforms for markers.
+    为每个关节/连杆的可达区域用不同颜色画在同一张图上，
+    生成 2 个子图（左臂 / 右臂），可以直观看出各关节构型的覆盖范围。
+
+    绘制顺序：EE（最外层）先画 → 基座（最内层）后画，
+    这样内部关节的点不会被外部关节的大量散点覆盖。
     """
-    fig, axes = plt.subplots(2, 3, figsize=(21, 14))
-    fig.suptitle("Old vs New URDF — Workspace Comparison (XY, vehicle frame)",
+    # Build label map: link name → joint name + type
+    joint_label = {}
+    for j in chain:
+        jt = j.jtype[0].upper()  # R/P/F
+        joint_label[j.child] = f"{j.child} ({j.name}, {jt})"
+
+    n_links = len(link_names)
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 9))
+    fig.suptitle("Per-Joint Reachable Area — berrybolter_arm (XY, vehicle frame)",
                  fontsize=14, fontweight='bold')
 
-    row_data = [
-        ("End-Effector", old_l_ee, old_r_ee, new_l_ee, new_r_ee),
-        ("Full-Body", old_l_all, old_r_all, new_l_all, new_r_all),
-    ]
-
-    for row, (tag, ol, orr, nl, nr) in enumerate(row_data):
-        # Col 0: old
-        ax = axes[row][0]
+    for ax_idx, (arm_tag, pts_dict, T_mount) in enumerate([
+        ("Left Arm", link_pts_left, T_left),
+        ("Right Arm", link_pts_right, T_right),
+    ]):
+        ax = axes[ax_idx]
         draw_vehicle_box(ax)
-        _add_shape_patch(ax, ol, fc='#AFC4E4', ec='#3B6DAD',
-                         alpha=0.4, lw=1.5, label='Old Left')
-        _add_shape_patch(ax, orr, fc='#BEE4C8', ec='#2D8B4E',
-                         alpha=0.4, lw=1.5, label='Old Right')
-        inter_g, inter_a = compute_intersection_polygon(ol, orr)
-        if inter_g is not None:
-            _add_shape_patch(ax, inter_g, fc='#FF6B6B', ec='red',
-                             alpha=0.4, lw=1.5,
-                             label=f'Old Intersection ({inter_a:.4f} m\u00b2)')
-        ax.scatter(T_left_old[0,3], T_left_old[1,3], c='blue', marker='*',
-                   s=200, zorder=5, label='Left base')
-        ax.scatter(T_right_old[0,3], T_right_old[1,3], c='green', marker='*',
-                   s=200, zorder=5, label='Right base')
-        ax.set_title(f"Old URDF — {tag}", fontsize=11)
-        ax.set_aspect('equal'); ax.grid(True, alpha=0.3)
-        handles, labels = ax.get_legend_handles_labels()
-        ax.legend(dict(zip(labels, handles)).values(),
-                  dict(zip(labels, handles)).keys(), fontsize=7)
 
-        # Col 1: new
-        ax = axes[row][1]
-        draw_vehicle_box(ax)
-        _add_shape_patch(ax, nl, fc='#AFC4E4', ec='#3B6DAD',
-                         alpha=0.4, lw=1.5, label='New Left')
-        _add_shape_patch(ax, nr, fc='#BEE4C8', ec='#2D8B4E',
-                         alpha=0.4, lw=1.5, label='New Right')
-        inter_g2, inter_a2 = compute_intersection_polygon(nl, nr)
-        if inter_g2 is not None:
-            _add_shape_patch(ax, inter_g2, fc='#FF6B6B', ec='red',
-                             alpha=0.4, lw=1.5,
-                             label=f'New Intersection ({inter_a2:.4f} m\u00b2)')
-        ax.scatter(T_left_new[0,3], T_left_new[1,3], c='blue', marker='*',
-                   s=200, zorder=5, label='Left base')
-        ax.scatter(T_right_new[0,3], T_right_new[1,3], c='green', marker='*',
-                   s=200, zorder=5, label='Right base')
-        ax.set_title(f"New URDF — {tag}", fontsize=11)
-        ax.set_aspect('equal'); ax.grid(True, alpha=0.3)
-        handles, labels = ax.get_legend_handles_labels()
-        ax.legend(dict(zip(labels, handles)).values(),
-                  dict(zip(labels, handles)).keys(), fontsize=7)
+        # Draw in REVERSE order: EE first (bottom), base_link last (top)
+        # so that inner joints (smaller coverage) are visible on top
+        for draw_i, i in enumerate(reversed(range(n_links))):
+            lname = link_names[i]
+            pts = pts_dict.get(lname)
+            if pts is None or len(pts) == 0:
+                continue
+            color = JOINT_COLORS[i % len(JOINT_COLORS)]
+            label = joint_label.get(lname, lname)
+            # Inner joints get slightly larger points for visibility
+            sz = 0.6 + draw_i * 0.15
+            ax.scatter(pts[:, 0], pts[:, 1], s=sz, c=color, alpha=0.5,
+                       zorder=1 + draw_i, rasterized=True, label=label)
 
-        # Col 2: overlay (old=dashed outline, new=solid light fill)
-        ax = axes[row][2]
-        draw_vehicle_box(ax)
-        _add_shape_patch(ax, ol, fc='none', ec='#3B6DAD',
-                         alpha=0.6, lw=2, ls='--', label='Old Left')
-        _add_shape_patch(ax, orr, fc='none', ec='#2D8B4E',
-                         alpha=0.6, lw=2, ls='--', label='Old Right')
-        _add_shape_patch(ax, nl, fc='#AFC4E4', ec='#3B6DAD',
-                         alpha=0.25, lw=2, ls='-', label='New Left')
-        _add_shape_patch(ax, nr, fc='#BEE4C8', ec='#2D8B4E',
-                         alpha=0.25, lw=2, ls='-', label='New Right')
-        # Show both old and new base markers if they differ
-        ax.scatter(T_left_old[0,3], T_left_old[1,3], c='blue', marker='*',
-                   s=200, zorder=5, label='Old Left base')
-        ax.scatter(T_right_old[0,3], T_right_old[1,3], c='green', marker='*',
-                   s=200, zorder=5, label='Old Right base')
-        if (not np.allclose(T_left_old[:2, 3], T_left_new[:2, 3], atol=1e-4) or
-                not np.allclose(T_right_old[:2, 3], T_right_new[:2, 3], atol=1e-4)):
-            ax.scatter(T_left_new[0,3], T_left_new[1,3], c='blue', marker='D',
-                       s=120, zorder=5, label='New Left base')
-            ax.scatter(T_right_new[0,3], T_right_new[1,3], c='green', marker='D',
-                       s=120, zorder=5, label='New Right base')
-        ax.set_title(f"Overlay (dashed=Old, solid=New) — {tag}", fontsize=11)
-        ax.set_aspect('equal'); ax.grid(True, alpha=0.3)
-        handles, labels = ax.get_legend_handles_labels()
-        ax.legend(dict(zip(labels, handles)).values(),
-                  dict(zip(labels, handles)).keys(), fontsize=7)
+        # Arm base markers
+        ax.scatter(T_left[0, 3], T_left[1, 3], c='blue', marker='*', s=300,
+                   zorder=20, label='Left arm base', edgecolors='black', linewidths=0.5)
+        ax.scatter(T_right[0, 3], T_right[1, 3], c='green', marker='*', s=300,
+                   zorder=20, label='Right arm base', edgecolors='black', linewidths=0.5)
 
-    for ax_row in axes:
-        for ax in ax_row:
-            ax.set_xlabel("x (m)")
-            ax.set_ylabel("y (m)")
+        ax.set_title(f"{arm_tag} — Per-Joint Workspace", fontsize=12)
+        ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
+        ax.set_aspect('equal'); ax.grid(True, alpha=0.3)
+
+        # Build legend in chain order (base → EE), not draw order
+        handles, labels = ax.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        # Reorder: chain order first, then base markers
+        ordered_handles, ordered_labels = [], []
+        for i, lname in enumerate(link_names):
+            lab = joint_label.get(lname, lname)
+            if lab in by_label:
+                ordered_labels.append(lab)
+                ordered_handles.append(by_label.pop(lab))
+        # Append remaining (base markers, vehicle box)
+        for lab, h in by_label.items():
+            ordered_labels.append(lab)
+            ordered_handles.append(h)
+        ax.legend(ordered_handles, ordered_labels,
+                  loc='upper left', fontsize=6.5, markerscale=5,
+                  ncol=1, framealpha=0.85)
 
     plt.tight_layout()
-    fpath = os.path.join(OUT_DIR, "old_vs_new_comparison.png")
+    fpath = os.path.join(OUT_DIR, f"{out_prefix}_per_joint_workspace.png")
     plt.savefig(fpath, dpi=200, bbox_inches='tight')
     print(f"Saved: {fpath}")
     plt.close(fig)
-
-
-# ────────────────────────────────────────────
-# Load old URDF workspace (reuse FK from workspace_viz_old_urdf)
-# ────────────────────────────────────────────
-
-def _import_old_urdf_module():
-    """Import workspace_viz_old_urdf as module from same directory."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "workspace_viz_old_urdf",
-        os.path.join(_HERE, "workspace_viz_old_urdf.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 # ────────────────────────────────────────────
@@ -646,7 +610,6 @@ def main():
     print(f"Right arm base (vehicle frame): x={T_right[0,3]:.5f}, y={T_right[1,3]:.5f}")
 
     # ── New URDF: parse single-arm chain ──
-    # Chain: arm_base → base_link → link1 → ... → ee_link
     new_chain = parse_urdf_chain(NEW_URDF_PATH, "arm_base", "ee_link")
     print(f"\nNew URDF chain: {len(new_chain)} joints, "
           f"{sum(1 for j in new_chain if j.jtype != 'fixed')} actuated")
@@ -659,11 +622,22 @@ def main():
     new_ee_local, new_all_local, new_link_dict = compute_workspace(new_chain, n_samples)
     print(f"  EE points: {len(new_ee_local)}, All link points: {len(new_all_local)}")
 
+    # Ordered link names (chain order, base → EE)
+    link_names = [j.child for j in new_chain]
+    print(f"  Links (chain order): {link_names}")
+
     # Transform to vehicle frame
     new_left_ee = transform_points_2d(new_ee_local, T_left)
     new_left_all = transform_points_2d(new_all_local, T_left)
     new_right_ee = transform_points_2d(new_ee_local, T_right)
     new_right_all = transform_points_2d(new_all_local, T_right)
+
+    # Per-link points in vehicle frame
+    link_pts_left = {}
+    link_pts_right = {}
+    for lname, pts_local in new_link_dict.items():
+        link_pts_left[lname] = transform_points_2d(pts_local, T_left)
+        link_pts_right[lname] = transform_points_2d(pts_local, T_right)
 
     print(f"New Left EE range: x=[{new_left_ee[:,0].min():.3f}, {new_left_ee[:,0].max():.3f}], "
           f"y=[{new_left_ee[:,1].min():.3f}, {new_left_ee[:,1].max():.3f}]")
@@ -671,14 +645,14 @@ def main():
           f"y=[{new_right_ee[:,1].min():.3f}, {new_right_ee[:,1].max():.3f}]")
 
     # ── Compute boundaries ──
-    print("\nComputing convex hull boundaries (new URDF)...")
+    print("\nComputing convex hull boundaries...")
     new_l_ee_hull = compute_alpha_shape(new_left_ee, 0)
     new_r_ee_hull = compute_alpha_shape(new_right_ee, 0)
     new_l_all_hull = compute_alpha_shape(new_left_all, 0)
     new_r_all_hull = compute_alpha_shape(new_right_all, 0)
 
-    # ── Plot new URDF workspace ──
-    print("\nGenerating new URDF plots (convex hull)...")
+    # ── Plot workspace (convex hull) ──
+    print("\nGenerating workspace plots (convex hull)...")
     plot_workspace_figure(
         new_l_ee_hull, new_r_ee_hull,
         new_l_all_hull, new_r_all_hull,
@@ -690,14 +664,14 @@ def main():
     )
 
     # ── Concave alpha-shape boundaries ──
-    print("Computing concave alpha-shape boundaries (new URDF)...")
+    print("Computing concave alpha-shape boundaries...")
     alpha_ee, alpha_all = 8.0, 5.0
     new_l_ee_alpha = compute_alpha_shape(new_left_ee, alpha_ee)
     new_r_ee_alpha = compute_alpha_shape(new_right_ee, alpha_ee)
     new_l_all_alpha = compute_alpha_shape(new_left_all, alpha_all)
     new_r_all_alpha = compute_alpha_shape(new_right_all, alpha_all)
 
-    print("Generating new URDF plots (alpha-shape)...")
+    print("Generating workspace plots (alpha-shape)...")
     plot_workspace_figure(
         new_l_ee_alpha, new_r_ee_alpha,
         new_l_all_alpha, new_r_all_alpha,
@@ -708,43 +682,11 @@ def main():
         left_all_pts=new_left_all, right_all_pts=new_right_all,
     )
 
-    # ── Old URDF workspace (for comparison) ──
-    print("\n--- Also computing OLD URDF workspace for comparison ---")
-    old_mod = _import_old_urdf_module()
-
-    old_tree = ET.parse(OLD_URDF_PATH)
-    old_root = old_tree.getroot()
-
-    def get_old_joint_T(jname):
-        j = old_root.find(f"./joint[@name='{jname}']")
-        o = j.find("origin")
-        xyz = [float(v) for v in o.attrib.get("xyz", "0 0 0").split()]
-        rpy = [float(v) for v in o.attrib.get("rpy", "0 0 0").split()]
-        return xyzrpy_to_T(xyz, rpy)
-
-    T_left_old = get_old_joint_T("vehicle_to_left_arm")
-    T_right_old = get_old_joint_T("vehicle_to_right_arm")
-
-    old_chain = old_mod.parse_urdf_chain(OLD_URDF_PATH, "left_arm_base_link", "left_arm_ee_link")
-    old_ee_local, old_all_local, _ = old_mod.compute_workspace(old_chain, n_samples)
-
-    old_left_ee = old_mod.transform_points_2d(old_ee_local, T_left_old)
-    old_left_all = old_mod.transform_points_2d(old_all_local, T_left_old)
-    old_right_ee = old_mod.transform_points_2d(old_ee_local, T_right_old)
-    old_right_all = old_mod.transform_points_2d(old_all_local, T_right_old)
-
-    old_l_ee_hull = compute_alpha_shape(old_left_ee, 0)
-    old_r_ee_hull = compute_alpha_shape(old_right_ee, 0)
-    old_l_all_hull = compute_alpha_shape(old_left_all, 0)
-    old_r_all_hull = compute_alpha_shape(old_right_all, 0)
-
-    # ── Comparison plot ──
-    print("\nGenerating OLD vs NEW comparison plot...")
-    plot_comparison(
-        old_l_ee_hull, old_r_ee_hull, old_l_all_hull, old_r_all_hull,
-        new_l_ee_hull, new_r_ee_hull, new_l_all_hull, new_r_all_hull,
-        T_left_old, T_right_old,
-        T_left, T_right,
+    # ── Per-joint workspace visualization ──
+    print("\nGenerating per-joint workspace plot...")
+    plot_per_joint_workspace(
+        link_names, link_pts_left, link_pts_right,
+        T_left, T_right, new_chain, out_prefix="new_urdf",
     )
 
     print("\nDone! All plots saved to:", OUT_DIR)
