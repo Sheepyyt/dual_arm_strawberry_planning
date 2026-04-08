@@ -379,8 +379,6 @@ def shapely_to_mpl_patch(geom, **kwargs):
 
 
 # ────────────────────────────────────────────
-# Per-joint colors (distinct for up to 10 links)
-# ────────────────────────────────────────────
 # Per-joint colors — high-contrast, saturated, carefully ordered
 # ────────────────────────────────────────────
 JOINT_COLORS = [
