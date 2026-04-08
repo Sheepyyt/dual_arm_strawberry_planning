@@ -20,7 +20,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from matplotlib.patches import Polygon as MplPolygon
 from scipy.spatial import ConvexHull
 
 # ────────────────────────────────────────────
@@ -287,32 +286,6 @@ def hull_polygon_xy(hull):
     return verts
 
 
-def polygon_intersection_area(verts_a, verts_b):
-    """
-    Compute intersection of two convex polygons using Shapely.
-    Returns (intersection_polygon_verts_or_None, area).
-    """
-    from shapely.geometry import Polygon as ShapelyPolygon
-    if len(verts_a) < 3 or len(verts_b) < 3:
-        return None, 0.0
-    pa = ShapelyPolygon(verts_a)
-    pb = ShapelyPolygon(verts_b)
-    if not pa.is_valid:
-        pa = pa.buffer(0)
-    if not pb.is_valid:
-        pb = pb.buffer(0)
-    inter = pa.intersection(pb)
-    if inter.is_empty:
-        return None, 0.0
-    if inter.geom_type == 'MultiPolygon':
-        # return the largest sub-polygon
-        largest = max(inter.geoms, key=lambda g: g.area)
-        return np.array(largest.exterior.coords), inter.area
-    if inter.geom_type == 'Polygon':
-        return np.array(inter.exterior.coords), inter.area
-    return None, 0.0
-
-
 # ────────────────────────────────────────────
 # concave hull (alpha shape) helper
 # ────────────────────────────────────────────
@@ -331,52 +304,108 @@ def compute_alpha_shape(pts, alpha=0.0):
     Use alphashape or fallback to convex hull.
     alpha=0 → convex hull; larger alpha → tighter boundary.
     Points are downsampled to keep computation fast.
+
+    Returns a Shapely geometry (Polygon/MultiPolygon) that may contain
+    interior holes, or None if degenerate.
     """
+    from shapely.geometry import Polygon as ShapelyPolygon, MultiPolygon
     if alpha == 0:
         hull = safe_convex_hull(pts)
-        return hull_polygon_xy(hull) if hull else np.empty((0, 2))
+        if hull is None:
+            return None
+        verts = hull_polygon_xy(hull)
+        if len(verts) < 3:
+            return None
+        return ShapelyPolygon(verts)
     try:
         import alphashape as ash
-        from shapely.geometry import MultiPolygon
         pts_ds = _downsample_for_alpha(pts, max_pts=3000)
         shape = ash.alphashape(pts_ds, alpha)
         if shape is None or shape.is_empty:
             hull = safe_convex_hull(pts)
-            return hull_polygon_xy(hull) if hull else np.empty((0, 2))
+            if hull is None:
+                return None
+            return ShapelyPolygon(hull_polygon_xy(hull))
         if isinstance(shape, MultiPolygon):
-            largest = max(shape.geoms, key=lambda g: g.area)
-            return np.array(largest.exterior.coords)
-        if hasattr(shape, 'exterior'):
-            return np.array(shape.exterior.coords)
+            return max(shape.geoms, key=lambda g: g.area)
+        if isinstance(shape, ShapelyPolygon):
+            return shape
+        # Fallback
         hull = safe_convex_hull(pts)
-        return hull_polygon_xy(hull) if hull else np.empty((0, 2))
+        if hull is None:
+            return None
+        return ShapelyPolygon(hull_polygon_xy(hull))
     except Exception:
         hull = safe_convex_hull(pts)
-        return hull_polygon_xy(hull) if hull else np.empty((0, 2))
+        if hull is None:
+            return None
+        return ShapelyPolygon(hull_polygon_xy(hull))
 
 
-def compute_intersection_polygon(verts_a, verts_b):
-    """Compute intersection polygon (possibly concave) of two polygons."""
-    from shapely.geometry import Polygon as ShapelyPolygon, MultiPolygon
-    if len(verts_a) < 3 or len(verts_b) < 3:
+def compute_intersection_polygon(shape_a, shape_b):
+    """
+    Compute intersection of two Shapely geometries.
+    Returns (intersection_shapely_geom_or_None, area).
+    """
+    if shape_a is None or shape_b is None:
         return None, 0.0
-    pa = ShapelyPolygon(verts_a)
-    pb = ShapelyPolygon(verts_b)
-    if not pa.is_valid:
-        pa = pa.buffer(0)
-    if not pb.is_valid:
-        pb = pb.buffer(0)
-    inter = pa.intersection(pb)
+    if not shape_a.is_valid:
+        shape_a = shape_a.buffer(0)
+    if not shape_b.is_valid:
+        shape_b = shape_b.buffer(0)
+    inter = shape_a.intersection(shape_b)
     if inter.is_empty:
         return None, 0.0
-    if inter.geom_type == 'MultiPolygon':
-        parts = []
-        for g in inter.geoms:
-            parts.append(np.array(g.exterior.coords))
-        return parts, inter.area
-    if inter.geom_type == 'Polygon':
-        return [np.array(inter.exterior.coords)], inter.area
-    return None, 0.0
+    return inter, inter.area
+
+
+def _shapely_to_mpl_path(geom):
+    """
+    Convert a Shapely Polygon (possibly with holes) into a matplotlib Path
+    so that interior holes are rendered correctly.
+    """
+    from matplotlib.path import Path as MplPath
+    import matplotlib.patches as mpatches
+
+    codes_all = []
+    verts_all = []
+
+    def _ring_to_codes_verts(ring_coords):
+        coords = list(ring_coords)
+        n = len(coords)
+        codes = [MplPath.MOVETO] + [MplPath.LINETO] * (n - 2) + [MplPath.CLOSEPOLY]
+        return coords, codes
+
+    from shapely.geometry import Polygon as ShapelyPolygon, MultiPolygon
+    polygons = []
+    if isinstance(geom, MultiPolygon):
+        polygons = list(geom.geoms)
+    elif isinstance(geom, ShapelyPolygon):
+        polygons = [geom]
+    else:
+        return None
+
+    for poly in polygons:
+        ext_coords, ext_codes = _ring_to_codes_verts(poly.exterior.coords)
+        verts_all.extend(ext_coords)
+        codes_all.extend(ext_codes)
+        for interior in poly.interiors:
+            int_coords, int_codes = _ring_to_codes_verts(interior.coords)
+            verts_all.extend(int_coords)
+            codes_all.extend(int_codes)
+
+    if not verts_all:
+        return None
+    return MplPath(verts_all, codes_all)
+
+
+def shapely_to_mpl_patch(geom, **kwargs):
+    """Create a matplotlib PathPatch from a Shapely geometry (with holes)."""
+    from matplotlib.patches import PathPatch
+    path = _shapely_to_mpl_path(geom)
+    if path is None:
+        return None
+    return PathPatch(path, **kwargs)
 
 
 # ────────────────────────────────────────────
@@ -393,9 +422,35 @@ def draw_vehicle_box(ax):
     ax.add_patch(rect)
 
 
+def _draw_workspace_on_ax(ax, shape, pts, facecolor, edgecolor, label,
+                          alpha_fill=0.35, outline_only=False):
+    """
+    Draw a workspace region on an axes.
+
+    When outline_only=True (used for single-arm subplots):
+      - Scatter the raw FK points (density naturally reveals inner holes)
+      - Draw boundary as outline only (no fill), so the scatter hole is visible
+
+    When outline_only=False (used for combined/intersection subplots):
+      - Draw filled boundary polygon (with interior holes rendered via PathPatch)
+    """
+    if pts is not None and len(pts) > 0:
+        ax.scatter(pts[:, 0], pts[:, 1], s=0.3, c=facecolor, alpha=0.3,
+                   zorder=1, rasterized=True)
+    if shape is not None:
+        fc = 'none' if outline_only else facecolor
+        af = 1.0 if outline_only else alpha_fill
+        lw = 2.0 if outline_only else 1.5
+        patch = shapely_to_mpl_patch(
+            shape, facecolor=fc, edgecolor=edgecolor,
+            alpha=af, linewidth=lw, zorder=2, label=label)
+        if patch is not None:
+            ax.add_patch(patch)
+
+
 def plot_workspace_figure(
-    left_ee_verts, right_ee_verts,
-    left_all_verts, right_all_verts,
+    left_ee_shape, right_ee_shape,
+    left_all_shape, right_all_shape,
     T_left, T_right,
     title_prefix, out_prefix,
     left_ee_pts=None, right_ee_pts=None,
@@ -403,12 +458,12 @@ def plot_workspace_figure(
 ):
     """
     绘制两张图:
-    Figure 1: EE workspace
+    Figure 1: EE workspace (with holes for unreachable inner region)
     Figure 2: Full body workspace
     """
-    for fig_idx, (l_verts, r_verts, tag, l_pts, r_pts) in enumerate([
-        (left_ee_verts, right_ee_verts, "End-Effector", left_ee_pts, right_ee_pts),
-        (left_all_verts, right_all_verts, "Full-Body (All Links)", left_all_pts, right_all_pts),
+    for fig_idx, (l_shape, r_shape, tag, l_pts, r_pts) in enumerate([
+        (left_ee_shape, right_ee_shape, "End-Effector", left_ee_pts, right_ee_pts),
+        (left_all_shape, right_all_shape, "Full-Body (All Links)", left_all_pts, right_all_pts),
     ]):
         fig, axes = plt.subplots(1, 3, figsize=(21, 7))
         fig.suptitle(f"{title_prefix} — {tag} Reachable Workspace (XY projection, vehicle frame)",
@@ -417,73 +472,57 @@ def plot_workspace_figure(
         # --- Subplot 1: Left arm ---
         ax = axes[0]
         draw_vehicle_box(ax)
-        if l_pts is not None and len(l_pts) > 0:
-            ax.scatter(l_pts[:, 0], l_pts[:, 1], s=0.3, c='#AFC4E4', alpha=0.3, zorder=1)
-        if len(l_verts) >= 3:
-            poly = MplPolygon(l_verts, closed=True, facecolor='#AFC4E4', edgecolor='#3B6DAD',
-                              alpha=0.4, linewidth=1.5, zorder=2, label='Left arm workspace')
-            ax.add_patch(poly)
+        _draw_workspace_on_ax(ax, l_shape, l_pts, '#AFC4E4', '#3B6DAD',
+                              'Left arm workspace', outline_only=True)
         ax.scatter(T_left[0, 3], T_left[1, 3], c='blue', marker='*', s=250,
                    zorder=5, label='Left arm base')
         ax.scatter(T_right[0, 3], T_right[1, 3], c='green', marker='*', s=250,
                    zorder=5, label='Right arm base')
         ax.set_title(f"Left Arm {tag} Workspace", fontsize=11)
-        ax.set_xlabel("x (m)")
-        ax.set_ylabel("y (m)")
-        ax.set_aspect('equal')
-        ax.grid(True, alpha=0.3)
+        ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
+        ax.set_aspect('equal'); ax.grid(True, alpha=0.3)
         ax.legend(loc='upper left', fontsize=7)
 
         # --- Subplot 2: Right arm ---
         ax = axes[1]
         draw_vehicle_box(ax)
-        if r_pts is not None and len(r_pts) > 0:
-            ax.scatter(r_pts[:, 0], r_pts[:, 1], s=0.3, c='#BEE4C8', alpha=0.3, zorder=1)
-        if len(r_verts) >= 3:
-            poly = MplPolygon(r_verts, closed=True, facecolor='#BEE4C8', edgecolor='#2D8B4E',
-                              alpha=0.4, linewidth=1.5, zorder=2, label='Right arm workspace')
-            ax.add_patch(poly)
+        _draw_workspace_on_ax(ax, r_shape, r_pts, '#BEE4C8', '#2D8B4E',
+                              'Right arm workspace', outline_only=True)
         ax.scatter(T_left[0, 3], T_left[1, 3], c='blue', marker='*', s=250,
                    zorder=5, label='Left arm base')
         ax.scatter(T_right[0, 3], T_right[1, 3], c='green', marker='*', s=250,
                    zorder=5, label='Right arm base')
         ax.set_title(f"Right Arm {tag} Workspace", fontsize=11)
-        ax.set_xlabel("x (m)")
-        ax.set_ylabel("y (m)")
-        ax.set_aspect('equal')
-        ax.grid(True, alpha=0.3)
+        ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
+        ax.set_aspect('equal'); ax.grid(True, alpha=0.3)
         ax.legend(loc='upper left', fontsize=7)
 
         # --- Subplot 3: Both + Intersection ---
         ax = axes[2]
         draw_vehicle_box(ax)
-        if len(l_verts) >= 3:
-            poly_l = MplPolygon(l_verts, closed=True, facecolor='#AFC4E4', edgecolor='#3B6DAD',
-                                alpha=0.3, linewidth=1.2, zorder=2, label='Left arm')
-            ax.add_patch(poly_l)
-        if len(r_verts) >= 3:
-            poly_r = MplPolygon(r_verts, closed=True, facecolor='#BEE4C8', edgecolor='#2D8B4E',
-                                alpha=0.3, linewidth=1.2, zorder=2, label='Right arm')
-            ax.add_patch(poly_r)
+        # Show scatter from both arms so holes are visible
+        _draw_workspace_on_ax(ax, l_shape, l_pts, '#AFC4E4', '#3B6DAD',
+                              'Left arm', outline_only=True)
+        _draw_workspace_on_ax(ax, r_shape, r_pts, '#BEE4C8', '#2D8B4E',
+                              'Right arm', outline_only=True)
 
         # Intersection
-        inter_parts, inter_area = compute_intersection_polygon(l_verts, r_verts)
-        if inter_parts is not None:
-            for ip in inter_parts:
-                poly_inter = MplPolygon(ip, closed=True, facecolor='#FF6B6B',
-                                        edgecolor='red', alpha=0.5, linewidth=2,
-                                        zorder=3, label=f'Intersection (area={inter_area:.4f} m²)')
-                ax.add_patch(poly_inter)
+        inter_geom, inter_area = compute_intersection_polygon(l_shape, r_shape)
+        if inter_geom is not None:
+            inter_patch = shapely_to_mpl_patch(
+                inter_geom, facecolor='#FF6B6B', edgecolor='red',
+                alpha=0.5, linewidth=2, zorder=3,
+                label=f'Intersection (area={inter_area:.4f} m²)')
+            if inter_patch is not None:
+                ax.add_patch(inter_patch)
+
         ax.scatter(T_left[0, 3], T_left[1, 3], c='blue', marker='*', s=250,
                    zorder=5, label='Left arm base')
         ax.scatter(T_right[0, 3], T_right[1, 3], c='green', marker='*', s=250,
                    zorder=5, label='Right arm base')
         ax.set_title(f"Both Arms + Intersection ({tag})", fontsize=11)
-        ax.set_xlabel("x (m)")
-        ax.set_ylabel("y (m)")
-        ax.set_aspect('equal')
-        ax.grid(True, alpha=0.3)
-        # Remove duplicate labels
+        ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
+        ax.set_aspect('equal'); ax.grid(True, alpha=0.3)
         handles, labels = ax.get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
         ax.legend(by_label.values(), by_label.keys(), loc='upper left', fontsize=7)
@@ -562,10 +601,17 @@ def main():
     left_all_boundary = compute_alpha_shape(left_all_vehicle, alpha_all)
     right_all_boundary = compute_alpha_shape(right_all_vehicle, alpha_all)
 
-    print(f"  Left EE boundary: {len(left_ee_boundary)} vertices")
-    print(f"  Right EE boundary: {len(right_ee_boundary)} vertices")
-    print(f"  Left full-body boundary: {len(left_all_boundary)} vertices")
-    print(f"  Right full-body boundary: {len(right_all_boundary)} vertices")
+    def _shape_info(s):
+        if s is None:
+            return "None"
+        n_ext = len(s.exterior.coords) if hasattr(s, 'exterior') else 0
+        n_holes = len(list(s.interiors)) if hasattr(s, 'interiors') else 0
+        return f"{n_ext} ext verts, {n_holes} holes, area={s.area:.4f} m²"
+
+    print(f"  Left EE boundary: {_shape_info(left_ee_boundary)}")
+    print(f"  Right EE boundary: {_shape_info(right_ee_boundary)}")
+    print(f"  Left full-body boundary: {_shape_info(left_all_boundary)}")
+    print(f"  Right full-body boundary: {_shape_info(right_all_boundary)}")
 
     # Plot
     print("\nGenerating plots...")
