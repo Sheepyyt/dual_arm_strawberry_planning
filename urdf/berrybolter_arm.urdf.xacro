@@ -42,14 +42,14 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/visual/base_link.STL" />
+        <mesh filename="meshes_single_arm/visual/base_link.STL" />
       </geometry>
       <material name="graphite_grey"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/collision/base_link.STL" />
+        <mesh filename="meshes_single_arm/collision/base_link.STL" />
       </geometry>
     </collision>
   </link>
@@ -63,14 +63,14 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/visual/link1.STL" />
+        <mesh filename="meshes_single_arm/visual/link1.STL" />
       </geometry>
       <material name="white_matte"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/collision/link1.STL" />
+        <mesh filename="meshes_single_arm/collision/link1.STL" />
       </geometry>
     </collision>
   </link>
@@ -92,14 +92,14 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/visual/link2.STL" />
+        <mesh filename="meshes_single_arm/visual/link2.STL" />
       </geometry>
       <material name="white_matte"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/collision/link2.STL" />
+        <mesh filename="meshes_single_arm/collision/link2.STL" />
       </geometry>
     </collision>
   </link>
@@ -121,14 +121,14 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/visual/link3.STL" />
+        <mesh filename="meshes_single_arm/visual/link3.STL" />
       </geometry>
       <material name="white_matte"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/collision/link3.STL" />
+        <mesh filename="meshes_single_arm/collision/link3.STL" />
       </geometry>
     </collision>
   </link>
@@ -150,14 +150,14 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/visual/link4.STL" />
+        <mesh filename="meshes_single_arm/visual/link4.STL" />
       </geometry>
       <material name="white_matte"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/collision/link4.STL" />
+        <mesh filename="meshes_single_arm/collision/link4.STL" />
       </geometry>
     </collision>
   </link>
@@ -179,14 +179,14 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/visual/link5.STL" />
+        <mesh filename="meshes_single_arm/visual/link5.STL" />
       </geometry>
       <material name="white_matte"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/collision/link5.STL" />
+        <mesh filename="meshes_single_arm/collision/link5.STL" />
       </geometry>
     </collision>
   </link>
@@ -208,14 +208,14 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/visual/link6.STL" />
+        <mesh filename="meshes_single_arm/visual/link6.STL" />
       </geometry>
       <material name="white_matte"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/collision/link6.STL" />
+        <mesh filename="meshes_single_arm/collision/link6.STL" />
       </geometry>
     </collision>
   </link>
@@ -237,14 +237,14 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/visual/link7.STL" />
+        <mesh filename="meshes_single_arm/visual/link7.STL" />
       </geometry>
       <material name="silver_metallic"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/collision/link7.STL" />
+        <mesh filename="meshes_single_arm/collision/link7.STL" />
       </geometry>
     </collision>
   </link>
@@ -266,14 +266,14 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/visual/ee_link.STL" />
+        <mesh filename="meshes_single_arm/visual/ee_link.STL" />
       </geometry>
       <material name="graphite_grey"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/collision/ee_link.STL" />
+        <mesh filename="meshes_single_arm/collision/ee_link.STL" />
       </geometry>
     </collision>
   </link>
@@ -295,14 +295,14 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/visual/camera_link.STL" />
+        <mesh filename="meshes_single_arm/visual/camera_link.STL" />
       </geometry>
       <material name="camera_black"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://berrybolter_arm_description/meshes_single_arm/collision/camera_link.STL" />
+        <mesh filename="meshes_single_arm/collision/camera_link.STL" />
       </geometry>
     </collision>
   </link>
