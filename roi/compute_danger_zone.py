@@ -485,6 +485,19 @@ def main():
     print(f"\n  E_I ∩ ROI_upper cells: {n_IU}  ({n_IU * GRID_RES**2 * 1e4:.1f} cm²)")
     print(f"  E_I ∩ ROI_lower cells: {n_IL}  ({n_IL * GRID_RES**2 * 1e4:.1f} cm²)")
 
+    # ---- Save danger zone grid for downstream use ----
+    grid_path = os.path.join(RESULT_DIR, "danger_zone_grid.npz")
+    np.savez_compressed(
+        grid_path,
+        grid=grid_I.grid,
+        x_min=grid_I.x_min,
+        y_min=grid_I.y_min,
+        res=grid_I.res,
+        nx=grid_I.nx,
+        ny=grid_I.ny,
+    )
+    print(f"\nSaved danger zone grid to {grid_path}")
+
     # ---- Visualise ----
     fig_path = os.path.join(RESULT_DIR, "danger_zone_envelopes.png")
     print(f"\nGenerating visualisation → {fig_path}")

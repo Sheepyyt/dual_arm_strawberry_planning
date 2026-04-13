@@ -2,15 +2,18 @@
 """
 real_cost_example.py — 'Real Cost' 模式使用示例
 =====================================================
-演示如何使用 RealCostPlanner（基于 URDF 机械臂定义 + cost table 真实代价）
-对固定停车点下的双臂草莓采摘任务进行规划与优化。
+演示如何使用 RealCostPlanner（基于 URDF 机械臂定义 + cost table 真实代价
++ 全身扫掠包络危险区干涉判定）对固定停车点下的双臂草莓采摘任务进行规划与优化。
 
 运行前请确保以下文件存在：
   - urdf/dual_arm_ik_xy_centered.urdf
   - roi/results/dual_arm_cost.pkl
+  - roi/results/interference_labels.pkl
 
-若 cost table 不存在，请先运行：
+若 cost table 或干涉标签不存在，请先运行：
   cd roi && python3 build_roi_table.py
+  cd roi && python3 compute_danger_zone.py
+  cd roi && python3 check_trajectory_interference.py
 """
 
 import os

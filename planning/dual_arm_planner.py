@@ -1119,6 +1119,9 @@ def _load_urdf_base_xy(urdf_path: str) -> Tuple[np.ndarray, np.ndarray]:
     return joint_xy("vehicle_to_left_arm"), joint_xy("vehicle_to_right_arm")
 
 
+_DEFAULT_INTERFERENCE_LABELS = os.path.join(_REPO_ROOT, "roi", "results", "interference_labels.pkl")
+
+
 class RealCostPlanner(DualArmPlannerCore):
     """
     Real Cost 规划模式。
@@ -1126,17 +1129,20 @@ class RealCostPlanner(DualArmPlannerCore):
     - 单程移动代价：从 cost table（dual_arm_cost.pkl）查表，不使用欧氏距离。
     - 任务采样：只从 cost table 中的可达网格离散点里采样，不支持连续随机采样。
     - 区域约束：B1/B4 强制 L-only，B3/B6 强制 R-only；B2/B5 按点实际可达性。
-    - 启发式顺序：预分配后，左臂 B2(L) → B1 → B4 → B5(L)，右臂 B5(R) → B6 → B3 → B2(R)。
+    - 干涉判定：不再使用 B2/B5 正方形区域，而是基于预计算的全身扫掠包络重叠危险区
+      （interference_labels.pkl），以点集形式标记每个草莓目标是否为干涉目标。
+    - 调度规则：分别对上半区域和下半区域，被标记为干涉的任务不允许双臂同时执行，
+      但上下半区域之间的干涉任务可以并行；非干涉任务始终可以并行。
     """
 
     # B1/B4 强制 L-only；B3/B6 强制 R-only；B2/B5 按点可达性
     _REGION_FORCE_L = {"B1", "B4"}
     _REGION_FORCE_R = {"B3", "B6"}
-    _REGION_INTERFERENCE = {"B2", "B5"}
 
     def __init__(self,
                  urdf_path: str = _DEFAULT_URDF,
                  cost_table_path: str = _DEFAULT_COST_TABLE,
+                 interference_labels_path: str = _DEFAULT_INTERFERENCE_LABELS,
                  q_home: Optional[np.ndarray] = None,
                  regions_config: Optional[List[Dict]] = None,
                  base_operation_time: float = 0.0):
@@ -1144,6 +1150,7 @@ class RealCostPlanner(DualArmPlannerCore):
         参数:
             urdf_path: dual_arm_ik_xy_centered.urdf 文件路径。
             cost_table_path: dual_arm_cost.pkl 文件路径。
+            interference_labels_path: interference_labels.pkl 文件路径。
             q_home: 机械臂处于回篮的初始配置。未指定时将使用和 cost table 构建时一样的默认姿态。
             regions_config: 采摘区域配置；为 None 时使用默认 B1-B6。
             base_operation_time: 固定处理时间。
@@ -1170,25 +1177,30 @@ class RealCostPlanner(DualArmPlannerCore):
             # ---- 1.5 从 URDF + q_home 动态解析 L_home/R_home 末端位置 ----
             if q_home is None:
                 q_home = np.array([0.10, -1.57, 0.23, -2.20, -1.40, -2.80, 0.0], dtype=float)
-                
+
             try:
                 from tracikpy import TracIKSolver
+                solver_l = TracIKSolver(urdf_path, "vehicle_link", "left_arm_ee_link")
+                solver_r = TracIKSolver(urdf_path, "vehicle_link", "right_arm_ee_link")
+                self.L_home = solver_l.fk(q_home)[:2, 3]
+                self.R_home = solver_r.fk(q_home)[:2, 3]
             except ImportError:
-                # 临时开发后备路径（通常通过 pip install dependency/tracikpy 即可正常导入）
-                import sys
-                fallback_dir = os.path.join(_REPO_ROOT, 'dependency/tracikpy/build/lib.linux-x86_64-cpython-38')
-                if fallback_dir not in sys.path:
-                    sys.path.append(fallback_dir)
-                from tracikpy import TracIKSolver
-                
-            solver_l = TracIKSolver(urdf_path, "vehicle_link", "left_arm_ee_link")
-            solver_r = TracIKSolver(urdf_path, "vehicle_link", "right_arm_ee_link")
-            self.L_home = solver_l.fk(q_home)[:2, 3]
-            self.R_home = solver_r.fk(q_home)[:2, 3]
+                # 后备方案：使用 compute_danger_zone 中的 URDFArmChain FK
+                import sys as _sys
+                _roi_dir = os.path.join(_REPO_ROOT, "roi")
+                if _roi_dir not in _sys.path:
+                    _sys.path.insert(0, _roi_dir)
+                from compute_danger_zone import URDFArmChain
+                _chain_l = URDFArmChain(urdf_path, "vehicle_to_left_arm", "left_arm")
+                _chain_r = URDFArmChain(urdf_path, "vehicle_to_right_arm", "right_arm")
+                pts_l = _chain_l.fk_all_frames(q_home)
+                pts_r = _chain_r.fk_all_frames(q_home)
+                self.L_home = pts_l[-1][:2]  # EE frame XY
+                self.R_home = pts_r[-1][:2]
 
         self._urdf_path = urdf_path
 
-        # ---- 2. 加载 cost table ----
+        # ---- 2. 加载 cost table (re-assign to avoid duplicate) ----
         if not os.path.isfile(cost_table_path):
             raise FileNotFoundError(f"Cost table not found: {cost_table_path}")
         with open(cost_table_path, "rb") as f:
@@ -1197,7 +1209,19 @@ class RealCostPlanner(DualArmPlannerCore):
         self._right_cost: Dict[str, float] = _ct["right_cost_table"]
         self._cost_table_path = cost_table_path
 
-        # ---- 3. 初始化基类 ----
+        # ---- 3. 加载干涉标签 ----
+        self._interference_labels: Dict[str, Dict] = {}
+        if os.path.isfile(interference_labels_path):
+            with open(interference_labels_path, "rb") as f:
+                self._interference_labels = pickle.load(f)
+            print(f"[RealCostPlanner] Interference labels: {interference_labels_path} "
+                  f"({len(self._interference_labels)} entries)")
+        else:
+            print(f"[RealCostPlanner] WARNING: Interference labels not found: "
+                  f"{interference_labels_path}")
+            print("  All tasks will be treated as non-interference.")
+
+        # ---- 4. 初始化基类 ----
         super().__init__(regions_config=regions_config,
                          base_operation_time=base_operation_time)
 
@@ -1217,6 +1241,30 @@ class RealCostPlanner(DualArmPlannerCore):
         if cost is None:
             return None
         return 2.0 * cost + self.base_operation_time
+
+    # ----------------------------------------------------------
+    # 干涉判定：基于预计算的干涉标签
+    # ----------------------------------------------------------
+    def _is_interference_point(self, x: float, y: float,
+                               accessible_by: List[str]) -> bool:
+        """
+        判断某个目标点是否为干涉点。
+        如果任一可达臂到达该点的轨迹经过危险区，则为干涉点。
+        """
+        key = f"{x:.3f}_{y:.3f}_0.560"
+        labels = self._interference_labels.get(key)
+        if labels is None:
+            return False
+        if "L" in accessible_by and labels.get("left_interference", False):
+            return True
+        if "R" in accessible_by and labels.get("right_interference", False):
+            return True
+        return False
+
+    @staticmethod
+    def _point_half(y: float) -> str:
+        """根据 y 坐标判断目标点所在半区域。"""
+        return "upper" if y > 0 else "lower"
 
     # ----------------------------------------------------------
     # 辅助：获取区域内可达网格点列表
@@ -1324,12 +1372,15 @@ class RealCostPlanner(DualArmPlannerCore):
 
             for idx in indices:
                 x, y, t_l, t_r, accessible_by = candidates[idx]
+                is_interf = self._is_interference_point(x, y, accessible_by)
                 task_data.append({
                     "region": name,
                     "x": x, "y": y,
                     "accessible_by": list(accessible_by),
                     "time_to_L": t_l,
                     "time_to_R": t_r,
+                    "is_interference": is_interf,
+                    "half": self._point_half(y),
                 })
 
         self.task_df = pd.DataFrame(task_data)
@@ -1390,6 +1441,8 @@ class RealCostPlanner(DualArmPlannerCore):
                 "accessible_by": accessible_by,
                 "time_to_L": t_l,
                 "time_to_R": t_r,
+                "is_interference": self._is_interference_point(x, y, accessible_by),
+                "half": self._point_half(y),
             })
 
         self.task_df = pd.DataFrame(task_data)
@@ -1397,93 +1450,528 @@ class RealCostPlanner(DualArmPlannerCore):
         return self.task_df
 
     # ----------------------------------------------------------
-    # 启发式：预分配 + 分离调度
+    # 参数提取：覆写基类以使用干涉标签
+    # ----------------------------------------------------------
+    def _extract_milp_parameters(self):
+        """
+        覆写基类的参数提取方法，使用 is_interference + half 替代 B2/B5 区域判定。
+        interference_set 按上下半区域分为两组。
+        """
+        parameters = {
+            "tasks": [],
+            "positions": {},
+            "regions": {},
+            "accessibility": {},
+            "processing_time": {},
+            "interference_set": set(),
+            "upper_interference": [],   # 上半区域干涉任务
+            "lower_interference": [],   # 下半区域干涉任务
+        }
+        for idx, row in self.task_df.iterrows():
+            task_id = f"t{idx}"
+            parameters["tasks"].append(task_id)
+            parameters["positions"][task_id] = (row["x"], row["y"])
+            parameters["regions"][task_id] = row["region"]
+            parameters["accessibility"][task_id] = row["accessible_by"]
+            if row.get("is_interference", False):
+                parameters["interference_set"].add(task_id)
+                half = row.get("half", self._point_half(row["y"]))
+                if half == "upper":
+                    parameters["upper_interference"].append(task_id)
+                else:
+                    parameters["lower_interference"].append(task_id)
+            if "L" in row["accessible_by"]:
+                parameters["processing_time"][(task_id, "L")] = row["time_to_L"]
+            if "R" in row["accessible_by"]:
+                parameters["processing_time"][(task_id, "R")] = row["time_to_R"]
+        self.milp_params = parameters
+
+    # ----------------------------------------------------------
+    # MILP 模型构建：覆写以使用干涉标签
+    # ----------------------------------------------------------
+    def build_milp_model(self, warm_start_actions: Optional[List[Dict]] = None) -> gp.Model:
+        """
+        覆写基类的 MILP 构建。
+        约束 4 不再按 B2/B5 区域，而是按上半区域干涉任务组和下半区域干涉任务组
+        分别施加串行约束。
+        """
+        if self.milp_params is None:
+            raise ValueError("No task data loaded.")
+
+        tasks = self.milp_params["tasks"]
+        arms = ["L", "R"]
+        processing_time = self.milp_params["processing_time"]
+        accessibility = self.milp_params["accessibility"]
+        upper_interference = self.milp_params["upper_interference"]
+        lower_interference = self.milp_params["lower_interference"]
+
+        model = gp.Model("DualArmHarvesting")
+        model.setParam('OutputFlag', 0)
+
+        x = model.addVars(tasks, arms, vtype=GRB.BINARY, name="x")
+        t = model.addVars(tasks, vtype=GRB.CONTINUOUS, name="t")
+        T = model.addVar(vtype=GRB.CONTINUOUS, name="T")
+
+        order_vars: Dict[Tuple[str, str, str], gp.Var] = {}
+        region_order_vars: Dict[Tuple[str, str], gp.Var] = {}
+
+        # 约束 1：每个任务只分配给一只手臂
+        for i in tasks:
+            model.addConstr(gp.quicksum(x[i, a] for a in accessibility[i]) == 1,
+                            name=f"assign_{i}")
+
+        # 约束 2：遵守可达性
+        for i in tasks:
+            for a in arms:
+                if a not in accessibility[i]:
+                    model.addConstr(x[i, a] == 0, name=f"reach_{i}_{a}")
+
+        # 约束 3：同一手臂的顺序约束
+        for idx_i in range(len(tasks)):
+            for idx_j in range(idx_i + 1, len(tasks)):
+                i = tasks[idx_i]
+                j = tasks[idx_j]
+                for a in arms:
+                    if a in accessibility[i] and a in accessibility[j]:
+                        o_ij = model.addVar(vtype=GRB.BINARY, name=f"order_{i}_{j}_{a}")
+                        o_ji = model.addVar(vtype=GRB.BINARY, name=f"order_{j}_{i}_{a}")
+                        order_vars[(i, j, a)] = o_ij
+                        order_vars[(j, i, a)] = o_ji
+                        model.addConstr(o_ij + o_ji == 1, name=f"order_sum_{i}_{j}_{a}")
+                        M = 1000
+                        model.addConstr(
+                            t[i] + processing_time[i, a]
+                            <= t[j] + M * (1 - o_ij) + M * (1 - x[i, a]) + M * (1 - x[j, a]),
+                            name=f"seq_{i}_{j}_{a}")
+                        model.addConstr(
+                            t[j] + processing_time[j, a]
+                            <= t[i] + M * (1 - o_ji) + M * (1 - x[i, a]) + M * (1 - x[j, a]),
+                            name=f"seq_{j}_{i}_{a}")
+
+        # 约束 4：干涉任务串行约束（按上下半区域分组）
+        for group_tasks in [upper_interference, lower_interference]:
+            for idx_i in range(len(group_tasks)):
+                for idx_j in range(idx_i + 1, len(group_tasks)):
+                    i = group_tasks[idx_i]
+                    j = group_tasks[idx_j]
+                    y_ij = model.addVar(vtype=GRB.BINARY, name=f"region_order_{i}_{j}")
+                    y_ji = model.addVar(vtype=GRB.BINARY, name=f"region_order_{j}_{i}")
+                    region_order_vars[(i, j)] = y_ij
+                    region_order_vars[(j, i)] = y_ji
+                    model.addConstr(y_ij + y_ji == 1, name=f"region_order_sum_{i}_{j}")
+                    M = 1000
+                    for a1 in accessibility[i]:
+                        for a2 in accessibility[j]:
+                            model.addConstr(
+                                t[i] + processing_time[i, a1]
+                                <= t[j] + M * (1 - y_ij) + M * (1 - x[i, a1]) + M * (1 - x[j, a2]),
+                                name=f"region_seq_{i}_{j}_{a1}_{a2}")
+                    for a1 in accessibility[j]:
+                        for a2 in accessibility[i]:
+                            model.addConstr(
+                                t[j] + processing_time[j, a1]
+                                <= t[i] + M * (1 - y_ji) + M * (1 - x[j, a1]) + M * (1 - x[i, a2]),
+                                name=f"region_seq_{j}_{i}_{a1}_{a2}")
+
+        # 约束 5：总完工时间下界
+        for i in tasks:
+            for a in accessibility[i]:
+                model.addConstr(
+                    t[i] + processing_time[i, a] <= T + 1000 * (1 - x[i, a]),
+                    name=f"makespan_{i}_{a}")
+
+        # 目标：最小化总完工时间
+        model.setObjective(T, GRB.MINIMIZE)
+
+        model._varmap = {
+            "x": x, "t": t, "T": T,
+            "order": order_vars,
+            "region_order": region_order_vars,
+            "tasks": tasks, "arms": arms,
+        }
+
+        if warm_start_actions is not None:
+            self._set_warm_start(model, warm_start_actions)
+
+        return model
+
+    # ----------------------------------------------------------
+    # 热启动：覆写以使用上下半区域干涉分组
+    # ----------------------------------------------------------
+    def _set_warm_start(self, model: gp.Model, actions: List[Dict]):
+        try:
+            if not hasattr(model, "_varmap") or model._varmap is None:
+                raise RuntimeError("Warm start requires model._varmap.")
+            varmap = model._varmap
+            x = varmap["x"]
+            t_var = varmap["t"]
+            T = varmap["T"]
+            order_vars = varmap.get("order", {})
+            region_order_vars = varmap.get("region_order", {})
+            tasks = self.milp_params["tasks"]
+            accessibility = self.milp_params["accessibility"]
+
+            x_warm: Dict[Tuple[str, str], int] = {}
+            t_warm: Dict[str, float] = {}
+
+            for task_id in tasks:
+                for arm in ["L", "R"]:
+                    if arm in accessibility[task_id]:
+                        x_warm[(task_id, arm)] = 0
+
+            for a in actions:
+                task_id = a["task"]
+                arm = a["arm"]
+                x_warm[(task_id, arm)] = 1
+                t_warm[task_id] = float(a["start"])
+
+            T_warm = float(max(a["end"] for a in actions)) if actions else 0.0
+
+            for (task_id, arm), value in x_warm.items():
+                try:
+                    x[task_id, arm].Start = value
+                except Exception:
+                    pass
+            for task_id in tasks:
+                try:
+                    t_var[task_id].Start = float(t_warm.get(task_id, 0.0))
+                except Exception:
+                    pass
+            try:
+                T.Start = T_warm
+            except Exception:
+                pass
+
+            task_index = {tid: idx for idx, tid in enumerate(tasks)}
+
+            for (i, j, arm), v in order_vars.items():
+                v.Start = 1 if task_index.get(i, 0) < task_index.get(j, 0) else 0
+
+            for arm in ["L", "R"]:
+                arm_actions = sorted([a for a in actions if a["arm"] == arm],
+                                     key=lambda z: z["start"])
+                tasks_on_arm = [a["task"] for a in arm_actions]
+                for k in range(len(tasks_on_arm)):
+                    for m in range(k + 1, len(tasks_on_arm)):
+                        i = tasks_on_arm[k]
+                        j = tasks_on_arm[m]
+                        v_ij = order_vars.get((i, j, arm))
+                        v_ji = order_vars.get((j, i, arm))
+                        if v_ij is not None:
+                            v_ij.Start = 1
+                        if v_ji is not None:
+                            v_ji.Start = 0
+
+            for (i, j), v in region_order_vars.items():
+                v.Start = 1 if task_index.get(i, 0) < task_index.get(j, 0) else 0
+
+            # 按上下半区域干涉分组设置热启动
+            upper_interference = self.milp_params["upper_interference"]
+            lower_interference = self.milp_params["lower_interference"]
+            for group_tasks in [upper_interference, lower_interference]:
+                task_times = [(tid, t_warm[tid]) for tid in group_tasks if tid in t_warm]
+                task_times.sort(key=lambda xx: xx[1])
+                sorted_tids = [xx[0] for xx in task_times]
+                for k in range(len(sorted_tids)):
+                    for m in range(k + 1, len(sorted_tids)):
+                        i = sorted_tids[k]
+                        j = sorted_tids[m]
+                        v_ij = region_order_vars.get((i, j))
+                        v_ji = region_order_vars.get((j, i))
+                        if v_ij is not None:
+                            v_ij.Start = 1
+                        if v_ji is not None:
+                            v_ji.Start = 0
+
+            print(f"Warm start values set successfully. Heuristic makespan: {T_warm:.2f}s")
+
+        except Exception as e:
+            print(f"Warning: Could not set warm start values: {e}")
+
+    # ----------------------------------------------------------
+    # 启发式：基于干涉标签的分离调度
     # ----------------------------------------------------------
     def spatial_order_heuristic(self) -> List[Dict]:
         """
-        Real Cost 空间顺序启发式。
-        步骤一：预分配任务归属
-          - B1/B4：全部归 L
-          - B3/B6：全部归 R
-          - B2：only-L 和 both → 归 L；only-R → 归 R
-          - B5：only-R 和 both → 归 R；only-L → 归 L
-        步骤二：调度顺序（左右臂同时从 t=0 开始工作）
-          - 左臂：B2(L 分配任务) → B1 → B4 → B5(L 分配任务)
-          - 右臂：B5(R 分配任务) → B6 → B3 → B2(R 分配任务)
-          两臂的区域按步交替调度，确保干涉区互斥约束正确生效。
+        Real Cost 启发式（基于干涉标签）。
+
+        步骤一：预分配双臂可达任务的归属
+          - B1/B4 区域任务强制归 L
+          - B3/B6 区域任务强制归 R
+          - B2/B5 区域中：only-L → L；only-R → R；
+            B2 的 both 可达任务优先归 L，B5 的优先归 R
+
+        步骤二：分两大类调度
+          - 非干涉任务（is_interference=False）：两臂可随意并行
+          - 干涉任务（is_interference=True）：同一半区域内的干涉任务必须串行
+            （同一半区域里，一个臂执行干涉任务时另一个臂只能执行该半区域的非干涉任务或其他半区域的任务）
+
+        调度顺序：
+          - 左臂先执行非干涉任务，再执行干涉任务
+          - 右臂先执行非干涉任务，再执行干涉任务
+          交替调度上下半区域干涉任务以保证互斥。
         """
         if self.task_df is None:
             raise ValueError("No task data loaded.")
 
         actions = []
         arm_times = {'L': 0.0, 'R': 0.0}
-        region_busy_until = {'B2': 0.0, 'B5': 0.0}
+        # 按上下半区域跟踪干涉任务的忙碌截止时间
+        interference_busy_until = {'upper': 0.0, 'lower': 0.0}
 
-        # ---- 步骤一：预分配 B2 / B5 中的任务 ----
-        def _preallocate(region_name: str, default_arm: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-            """
-            返回 (分给 L 的 df，分给 R 的 df)
-            B2 的 default_arm="L"：only-L 和 both 均归 L，only-R 归 R
-            B5 的 default_arm="R"：only-R 和 both 均归 R，only-L 归 L
-            """
-            rdf = self.task_df[self.task_df['region'] == region_name].copy()
-            l_rows, r_rows = [], []
-            for idx, row in rdf.iterrows():
-                ab = row['accessible_by']
-                if isinstance(ab, list) and "L" in ab and "R" not in ab:
-                    # only-L
-                    l_rows.append(idx)
-                elif isinstance(ab, list) and "R" in ab and "L" not in ab:
-                    # only-R
-                    r_rows.append(idx)
+        # ---- 步骤一：预分配 ----
+        l_tasks = []  # (df_idx, arm)
+        r_tasks = []
+
+        for idx, row in self.task_df.iterrows():
+            ab = row['accessible_by']
+            region = row['region']
+            if isinstance(ab, list):
+                if "L" in ab and "R" not in ab:
+                    l_tasks.append(idx)
+                elif "R" in ab and "L" not in ab:
+                    r_tasks.append(idx)
                 else:
-                    # both 可达：直接分给 default_arm
-                    (l_rows if default_arm == "L" else r_rows).append(idx)
-            return self.task_df.loc[l_rows], self.task_df.loc[r_rows]
+                    # both 可达
+                    if region in ("B2", "B1", "B4"):
+                        l_tasks.append(idx)
+                    else:
+                        r_tasks.append(idx)
 
-        b2_for_L, b2_for_R = _preallocate("B2", default_arm="L")
-        b5_for_L, b5_for_R = _preallocate("B5", default_arm="R")
+        # ---- 步骤二：对每个臂，先调度非干涉任务，再调度干涉任务 ----
+        def _schedule_arm_tasks(arm, task_indices):
+            nonlocal arm_times
+            arm_actions = []
+            non_interf = [i for i in task_indices
+                          if not self.task_df.iloc[i].get('is_interference', False)]
+            interf = [i for i in task_indices
+                      if self.task_df.iloc[i].get('is_interference', False)]
 
-        # 单臂区域（已强制 L-only / R-only，直接取全部）
-        b1_df = self.task_df[self.task_df['region'] == "B1"]
-        b3_df = self.task_df[self.task_df['region'] == "B3"]
-        b4_df = self.task_df[self.task_df['region'] == "B4"]
-        b6_df = self.task_df[self.task_df['region'] == "B6"]
+            # 非干涉任务：直接顺序执行，不需要等待
+            non_interf_df = self.task_df.iloc[non_interf].copy() if non_interf else pd.DataFrame()
+            if not non_interf_df.empty:
+                non_interf_df['proc_time'] = non_interf_df[f'time_to_{arm}']
+                non_interf_df = non_interf_df.sort_values('proc_time')
+                for i, row in non_interf_df.iterrows():
+                    start = arm_times[arm]
+                    end = start + row[f'time_to_{arm}']
+                    arm_actions.append({
+                        'task': f't{i}', 'arm': arm,
+                        'x': row['x'], 'y': row['y'],
+                        'start': start, 'end': end,
+                    })
+                    arm_times[arm] = end
 
-        # ---- 步骤二：调度（交替调度左右臂，确保两臂同时从 t=0 开始）----
-        print("Left arm sequence: B2(L) -> B1 -> B4 -> B5(L)")
-        print("Right arm sequence: B5(R) -> B6 -> B3 -> B2(R)")
+            # 干涉任务：按半区域分组串行
+            interf_df = self.task_df.iloc[interf].copy() if interf else pd.DataFrame()
+            if not interf_df.empty:
+                interf_df['proc_time'] = interf_df[f'time_to_{arm}']
+                interf_df = interf_df.sort_values('proc_time')
+                for i, row in interf_df.iterrows():
+                    half = row.get('half', self._point_half(row['y']))
+                    # 必须等待同半区域干涉任务完成
+                    actual_start = max(arm_times[arm],
+                                       interference_busy_until.get(half, 0.0))
+                    end = actual_start + row[f'time_to_{arm}']
+                    interference_busy_until[half] = end
+                    arm_actions.append({
+                        'task': f't{i}', 'arm': arm,
+                        'x': row['x'], 'y': row['y'],
+                        'start': actual_start, 'end': end,
+                    })
+                    arm_times[arm] = end
 
-        left_schedule = [
-            ('L', 'B2', b2_for_L),
-            ('L', 'B1', b1_df),
-            ('L', 'B4', b4_df),
-            ('L', 'B5', b5_for_L),
-        ]
-        right_schedule = [
-            ('R', 'B5', b5_for_R),
-            ('R', 'B6', b6_df),
-            ('R', 'B3', b3_df),
-            ('R', 'B2', b2_for_R),
-        ]
+            return arm_actions
 
-        # 交替调度：先左臂一个区域，再右臂一个区域，交替进行
-        # 这样当左臂到达 B5(L) 时，右臂的 B5(R) 已完成调度，
-        # 反之当右臂到达 B2(R) 时，左臂的 B2(L) 已完成调度。
-        n_steps = max(len(left_schedule), len(right_schedule))
-        for i in range(n_steps):
-            if i < len(left_schedule):
-                arm, region, rdf = left_schedule[i]
-                region_actions, arm_times['L'] = self._schedule_region_df(
-                    arm, region, rdf, arm_times['L'], region_busy_until)
-                actions.extend(region_actions)
-            if i < len(right_schedule):
-                arm, region, rdf = right_schedule[i]
-                region_actions, arm_times['R'] = self._schedule_region_df(
-                    arm, region, rdf, arm_times['R'], region_busy_until)
-                actions.extend(region_actions)
+        print("Scheduling with interference labels ...")
+        n_interf = sum(1 for _, r in self.task_df.iterrows()
+                       if r.get('is_interference', False))
+        print(f"  Interference tasks: {n_interf}, "
+              f"Non-interference: {len(self.task_df) - n_interf}")
+
+        # 交替调度：左臂一批、右臂一批
+        l_actions = _schedule_arm_tasks('L', l_tasks)
+        r_actions = _schedule_arm_tasks('R', r_tasks)
+        actions.extend(l_actions)
+        actions.extend(r_actions)
 
         return sorted(actions, key=lambda x: x["start"])
+
+    # ----------------------------------------------------------
+    # Gantt 图：覆写基类以显示干涉状态
+    # ----------------------------------------------------------
+    def plot_gantt_chart(self, actions: List[Dict],
+                         save_path: Optional[str] = None,
+                         title_suffix: str = "") -> None:
+        if self.task_df is None:
+            raise ValueError("No task data loaded.")
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        left_actions  = [a for a in actions if a['arm'] == 'L']
+        right_actions = [a for a in actions if a['arm'] == 'R']
+
+        def _bar_color(task_id):
+            task_idx = int(task_id[1:])
+            row = self.task_df.iloc[task_idx]
+            if row.get('is_interference', False):
+                return '#d65b5b'  # red for interference
+            return '#6dbd7d'      # green for non-interference
+
+        def _bar_label(task_id):
+            task_idx = int(task_id[1:])
+            row = self.task_df.iloc[task_idx]
+            status = "S" if row.get('is_interference', False) else "P"
+            half = row.get('half', 'upper' if row['y'] > 0 else 'lower')
+            half_tag = "U" if half == "upper" else "L"
+            return f"{task_id}\n{status}/{half_tag}"
+
+        for action in left_actions:
+            color = _bar_color(action['task'])
+            ax.barh(0, action['end'] - action['start'], left=action['start'],
+                    height=0.4, color=color, alpha=0.7, edgecolor='black')
+            mid_time = (action['start'] + action['end']) / 2
+            ax.text(mid_time, 0, _bar_label(action['task']),
+                    ha='center', va='center', fontsize=7, fontweight='bold')
+
+        for action in right_actions:
+            color = _bar_color(action['task'])
+            ax.barh(1, action['end'] - action['start'], left=action['start'],
+                    height=0.4, color=color, alpha=0.7, edgecolor='black')
+            mid_time = (action['start'] + action['end']) / 2
+            ax.text(mid_time, 1, _bar_label(action['task']),
+                    ha='center', va='center', fontsize=7, fontweight='bold')
+
+        ax.set_yticks([0, 1])
+        ax.set_yticklabels(['Left Arm (L)', 'Right Arm (R)'])
+        ax.set_xlabel('Time (seconds)')
+        ax.set_title(f'Dual-Arm Task Scheduling Gantt Chart{title_suffix}')
+        ax.grid(True, axis='x', alpha=0.3)
+
+        legend_elements = [
+            plt.Rectangle((0, 0), 1, 1, facecolor='#d65b5b', alpha=0.7,
+                           edgecolor='black', label='Serial (interference)'),
+            plt.Rectangle((0, 0), 1, 1, facecolor='#6dbd7d', alpha=0.7,
+                           edgecolor='black', label='Parallel (non-interference)'),
+        ]
+        ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.15, 1))
+
+        makespan = max(action['end'] for action in actions) if actions else 0
+        ax.axvline(x=makespan, color='red', linestyle='--', linewidth=2, alpha=0.8)
+        ax.text(makespan, 0.5, f'Makespan: {makespan:.2f}s', rotation=90,
+                ha='right', va='center', fontweight='bold', color='red')
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Gantt chart saved to {save_path}")
+            plt.close(fig)
+        else:
+            plt.show()
+
+    # ----------------------------------------------------------
+    # 动画：覆写基类以显示干涉状态
+    # ----------------------------------------------------------
+    def animate_solution(self, actions: List[Dict],
+                         save_path: Optional[str] = None,
+                         title: str = "Dual-Arm Harvesting Animation"
+                         ) -> animation.FuncAnimation:
+        if self.task_df is None:
+            raise ValueError("No task data loaded.")
+
+        fig, ax = plt.subplots(figsize=(8, 8))
+
+        # 绘制区域框
+        for i, region in enumerate(self.regions):
+            cx, cy = region["center"]
+            w, h = region["width"], region["height"]
+            ax.add_patch(plt.Rectangle((cx - w/2, cy - h/2), w, h,
+                                       fill=False, edgecolor=self.colors[i],
+                                       linewidth=2, label=region["name"]))
+
+        arm_L, = ax.plot(*self.L_base, 'ks', markersize=10, label='Left Arm Base (L)')
+        arm_R, = ax.plot(*self.R_base, 'ko', markersize=10, label='Right Arm Base (R)')
+
+        home_L, = ax.plot(*self.L_home[:2], 'b*', markersize=12, label='Left Arm Home')
+        home_R, = ax.plot(*self.R_home[:2], 'r*', markersize=12, label='Right Arm Home')
+
+        ax.add_patch(plt.Rectangle((-0.5, -0.25), 1.0, 0.5, fill=False,
+                                   edgecolor='black', linestyle='--', linewidth=1.5,
+                                   label='Operation Boundary'))
+
+        ax.set_xlim(-1, 1)
+        ax.set_ylim(-1, 1)
+        ax.set_aspect('equal')
+        ax.grid(True)
+        ax.set_title(title)
+
+        task_points = {}
+        task_states = {}
+
+        for act in actions:
+            task_id = act['task']
+            task_idx = int(task_id[1:])
+            row = self.task_df.iloc[task_idx]
+            is_interf = row.get('is_interference', False)
+            color = '#d65b5b' if is_interf else '#6dbd7d'
+            point, = ax.plot(act['x'], act['y'], 'o', color=color, markersize=8, alpha=0.8)
+            task_points[task_id] = (point, color)
+            task_states[task_id] = False
+
+        line_L, = ax.plot([], [], color='blue', lw=3, alpha=0.8, label='Left Arm')
+        line_R, = ax.plot([], [], color='red',  lw=3, alpha=0.8, label='Right Arm')
+        time_text = ax.text(-0.95, 0.95, '', fontsize=14,
+                            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+        ax.legend(loc='upper right', fontsize=7)
+
+        def init():
+            line_L.set_data([], [])
+            line_R.set_data([], [])
+            time_text.set_text('')
+            return [arm_L, arm_R, home_L, home_R, line_L, line_R, time_text] + \
+                   [p for p, c in task_points.values()]
+
+        def update(frame):
+            t_now = frame * 0.1
+            time_text.set_text(f"Time: {t_now:.1f}s")
+            line_L.set_data([], [])
+            line_R.set_data([], [])
+            for act in actions:
+                task_id = act['task']
+                if act['start'] <= t_now <= act['end']:
+                    base = self.L_base if act['arm'] == 'L' else self.R_base
+                    if act['arm'] == 'L':
+                        line_L.set_data([base[0], act['x']], [base[1], act['y']])
+                    else:
+                        line_R.set_data([base[0], act['x']], [base[1], act['y']])
+                elif t_now > act['end'] and not task_states[task_id]:
+                    task_states[task_id] = True
+                    old_point, color = task_points[task_id]
+                    old_point.remove()
+                    new_point, = ax.plot(act['x'], act['y'], 'x',
+                                        color=color,
+                                        markersize=12, markeredgewidth=3)
+                    task_points[task_id] = (new_point, color)
+            return [arm_L, arm_R, home_L, home_R, line_L, line_R, time_text] + \
+                   [p for p, c in task_points.values()]
+
+        max_time = max(act['end'] for act in actions) if actions else 10.0
+        frames = int(max_time * 10) + 10
+
+        ani = animation.FuncAnimation(fig, update, frames=frames, init_func=init,
+                                      interval=100, repeat=False, blit=False)
+        plt.tight_layout()
+
+        if save_path:
+            print(f"Saving animation to {save_path}...")
+            ani.save(save_path, writer='pillow', fps=10, dpi=100)
+            print("Animation saved successfully!")
+            plt.close(fig)
+        else:
+            plt.show()
+
+        return ani
 
 
 # ============================================================
