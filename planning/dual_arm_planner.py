@@ -1200,15 +1200,6 @@ class RealCostPlanner(DualArmPlannerCore):
 
         self._urdf_path = urdf_path
 
-        # ---- 2. 加载 cost table (re-assign to avoid duplicate) ----
-        if not os.path.isfile(cost_table_path):
-            raise FileNotFoundError(f"Cost table not found: {cost_table_path}")
-        with open(cost_table_path, "rb") as f:
-            _ct = pickle.load(f)
-        self._left_cost:  Dict[str, float] = _ct["left_cost_table"]
-        self._right_cost: Dict[str, float] = _ct["right_cost_table"]
-        self._cost_table_path = cost_table_path
-
         # ---- 3. 加载干涉标签 ----
         self._interference_labels: Dict[str, Dict] = {}
         if os.path.isfile(interference_labels_path):
