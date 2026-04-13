@@ -29,7 +29,7 @@ from dual_arm_planner import RealCostPlanner
 # ============================================================
 def example_real_cost_random():
     print("=== Real Cost Example 1: Grid-Sampled Random Tasks ===\n")
-    np.random.seed(42)
+    np.random.seed(0)
 
     # 初始化 RealCostPlanner（URDF 与 cost table 路径使用默认值）
     planner = RealCostPlanner()

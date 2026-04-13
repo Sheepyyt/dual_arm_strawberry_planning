@@ -70,10 +70,15 @@ CONFIG = {
 
     "report_every": 50,
 
-    # ---------- nominal seed ----------
-    # 7 joints: [prismatic, revolute, prismatic, revolute, revolute, revolute, revolute]
-    "q_seed": np.array(
+    # ---------- nominal seed & home pose ----------
+    # 用于加快 IK 收敛的初值
+    "q_ik_seed": np.array(
         [0.10, 0.0, 0.23, -1.57, -2.40, -1.93, 0.0],
+        dtype=float
+    ),
+    # 真实回篮/放篮的 home 姿态 (安全复位姿态，避免左右臂交叉干涉)
+    "q_home": np.array(
+        [0.10, -1.57, 0.23, -2.20, -1.40, -2.80, 0.0],
         dtype=float
     ),
 
@@ -144,12 +149,12 @@ def angle_key(yaw):
 
 
 def build_ranges(cfg):
-    x_range = np.arange(cfg["x_min"], cfg["x_max"] + 0.5 * cfg["step_xyz"], cfg["step_xyz"])
-    z_range = np.arange(cfg["z_min"], cfg["z_max"] + 0.5 * cfg["step_xyz"], cfg["step_xyz"])
-    yaw_range = np.arange(cfg["yaw_min"], cfg["yaw_max"] + 0.5 * cfg["step_yaw"], cfg["step_yaw"])
+    x_range = np.arange(cfg["x_min"], cfg["x_max"] + 1e-6, cfg["step_xyz"])
+    z_range = np.arange(cfg["z_min"], cfg["z_max"] + 1e-6, cfg["step_xyz"])
+    yaw_range = np.arange(cfg["yaw_min"], cfg["yaw_max"] + 1e-6, cfg["step_yaw"])
 
-    y_left = np.arange(cfg["left_side_y_min"], cfg["left_side_y_max"] + 0.5 * cfg["step_xyz"], cfg["step_xyz"])
-    y_right = np.arange(cfg["right_side_y_min"], cfg["right_side_y_max"] + 0.5 * cfg["step_xyz"], cfg["step_xyz"])
+    y_left = np.arange(cfg["left_side_y_min"], cfg["left_side_y_max"] + 1e-6, cfg["step_xyz"])
+    y_right = np.arange(cfg["right_side_y_min"], cfg["right_side_y_max"] + 1e-6, cfg["step_xyz"])
 
     return x_range, y_left, y_right, z_range, yaw_range
 
@@ -227,11 +232,11 @@ def solve_one_arm_for_vehicle_point(
     p_local_h = T_arm_from_vehicle @ np.array([p_vehicle[0], p_vehicle[1], p_vehicle[2], 1.0], dtype=float)
     x_l, y_l, z_l = p_local_h[:3]
 
-    yaw_range = np.arange(cfg["yaw_min"], cfg["yaw_max"] + 0.5 * cfg["step_yaw"], cfg["step_yaw"])
+    yaw_range = np.arange(cfg["yaw_min"], cfg["yaw_max"] + 1e-6, cfg["step_yaw"])
     ordered_yaws = build_center_out_yaw_order(yaw_range)
 
-    q_home = np.asarray(cfg["q_seed"], dtype=float)
-    q_seed = q_home.copy()
+    q_home = np.asarray(cfg["q_home"], dtype=float)
+    q_seed = np.asarray(cfg["q_ik_seed"], dtype=float)
 
     entry = {
         "angles": [],
@@ -374,11 +379,24 @@ def generate_dual_arm_roi_table(cfg):
     with open(cfg["roi_table_file"], "wb") as f:
         pickle.dump(roi_payload, f)
 
+    # Compute the home end-effector positions in vehicle frame
+    q_home = np.asarray(cfg["q_home"], dtype=float)
+    T_ee_l_local = solver.fk(q_home)
+    T_ee_r_local = T_ee_l_local  # Right arm uses the same local kinematics
+
+    T_ee_l_vehicle = T_left @ T_ee_l_local
+    T_ee_r_vehicle = T_right @ T_ee_r_local
+    
+    left_home_xy = T_ee_l_vehicle[:2, 3].tolist()
+    right_home_xy = T_ee_r_vehicle[:2, 3].tolist()
+
     with open(cfg["dual_arm_cost_file"], "wb") as f:
         pickle.dump(
             {
                 "left_cost_table": left_cost,
                 "right_cost_table": right_cost,
+                "left_home_xy": left_home_xy,
+                "right_home_xy": right_home_xy,
             },
             f,
         )

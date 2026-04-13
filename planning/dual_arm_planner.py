@@ -26,6 +26,11 @@ class DualArmPlannerCore:
     L_base: np.ndarray
     R_base: np.ndarray
 
+    # 回篮/放篮的安全末端点位 (Home pose in Cartesian space)
+    # 子类在 __init__ 中设置具体的数值
+    L_home: np.ndarray
+    R_home: np.ndarray
+
     def __init__(self,
                  regions_config: Optional[List[Dict]] = None,
                  base_operation_time: float = 0.0):
@@ -521,6 +526,9 @@ class DualArmPlannerCore:
         arm_L, = ax.plot(*self.L_base, 'ks', markersize=10, label='Left Arm Base (L)')
         arm_R, = ax.plot(*self.R_base, 'ko', markersize=10, label='Right Arm Base (R)')
 
+        home_L, = ax.plot(*self.L_home[:2], 'b*', markersize=12, label='Left Arm Home')
+        home_R, = ax.plot(*self.R_home[:2], 'r*', markersize=12, label='Right Arm Home')
+
         ax.add_patch(plt.Rectangle((-0.5, -0.25), 1.0, 0.5, fill=False,
                                    edgecolor='black', linestyle='--', linewidth=1.5,
                                    label='Operation Boundary'))
@@ -553,7 +561,7 @@ class DualArmPlannerCore:
             line_L.set_data([], [])
             line_R.set_data([], [])
             time_text.set_text('')
-            return [arm_L, arm_R, line_L, line_R, time_text] + list(task_points.values())
+            return [arm_L, arm_R, home_L, home_R, line_L, line_R, time_text] + list(task_points.values())
 
         def update(frame):
             t_now = frame * 0.1
@@ -577,7 +585,7 @@ class DualArmPlannerCore:
                                         color=self.colors[region_idx],
                                         markersize=12, markeredgewidth=3)
                     task_points[task_id] = new_point
-            return [arm_L, arm_R, line_L, line_R, time_text] + list(task_points.values())
+            return [arm_L, arm_R, home_L, home_R, line_L, line_R, time_text] + list(task_points.values())
 
         max_time = max(act['end'] for act in actions) if actions else 10.0
         frames = int(max_time * 10) + 10
@@ -766,6 +774,8 @@ class DualArmPlannerCore:
 
         ax2.plot(*self.L_base, 'ks', markersize=12, label='Left Arm Base')
         ax2.plot(*self.R_base, 'ko', markersize=12, label='Right Arm Base')
+        ax2.plot(*self.L_home[:2], 'b*', markersize=14, label='Left Arm Home')
+        ax2.plot(*self.R_home[:2], 'r*', markersize=14, label='Right Arm Home')
         ax2.set_title('Task Spatial Distribution')
         ax2.set_xlabel('X Position (m)')
         ax2.set_ylabel('Y Position (m)')
@@ -877,6 +887,10 @@ class DualArmPlannerCore:
                 "left":  self.L_base.tolist(),
                 "right": self.R_base.tolist()
             },
+            "arm_homes": {
+                "left":  self.L_home[:2].tolist(),
+                "right": self.R_home[:2].tolist()
+            },
             "regions": self.regions,
             "interference_regions": self.interference_regions,
             "total_tasks": len(self.task_df) if self.task_df is not None else 0,
@@ -897,7 +911,9 @@ class DualArmPlannerCore:
             f.write(f"- **Regions**: {', '.join([r['name'] for r in self.regions])}\n")
             f.write(f"- **Interference Regions**: {', '.join(self.interference_regions)}\n")
             f.write(f"- **Left Arm Base**: ({self.L_base[0]:.5f}, {self.L_base[1]:.5f})\n")
-            f.write(f"- **Right Arm Base**: ({self.R_base[0]:.5f}, {self.R_base[1]:.5f})\n\n")
+            f.write(f"- **Right Arm Base**: ({self.R_base[0]:.5f}, {self.R_base[1]:.5f})\n")
+            f.write(f"- **Left Arm Home**: ({self.L_home[0]:.5f}, {self.L_home[1]:.5f})\n")
+            f.write(f"- **Right Arm Home**: ({self.R_home[0]:.5f}, {self.R_home[1]:.5f})\n\n")
             f.write("## Task Distribution by Region\n")
             for region, count in self.task_df['region'].value_counts().sort_index().items():
                 f.write(f"- **{region}**: {count} tasks\n")
@@ -975,18 +991,24 @@ class BaselinePlanner(DualArmPlannerCore):
     def __init__(self,
                  L_base: np.ndarray = np.array([-0.3, 0.0]),
                  R_base: np.ndarray = np.array([ 0.3, 0.0]),
+                 L_home: np.ndarray = np.array([-0.10, 0.20]),  # 粗略几何替代
+                 R_home: np.ndarray = np.array([ 0.10, -0.20]), # 粗略几何替代
                  regions_config: Optional[List[Dict]] = None,
                  base_operation_time: float = 0.0):
         """
         参数:
             L_base: 左臂基座位置 (x, y)
             R_base: 右臂基座位置 (x, y)
+            L_home: 左臂末端回篮位置 (x, y)
+            R_home: 右臂末端回篮位置 (x, y)
             regions_config: 采摘区域配置；为 None 时使用默认 B1-B6。
             base_operation_time: 固定处理时间。
         """
         # 在 super().__init__() 之前设置基座，确保可视化方法可用
         self.L_base = np.asarray(L_base, dtype=float)
         self.R_base = np.asarray(R_base, dtype=float)
+        self.L_home = np.asarray(L_home, dtype=float)
+        self.R_home = np.asarray(R_home, dtype=float)
         super().__init__(regions_config=regions_config,
                          base_operation_time=base_operation_time)
 
@@ -994,8 +1016,8 @@ class BaselinePlanner(DualArmPlannerCore):
     # 代价函数：欧氏距离
     # ----------------------------------------------------------
     def _compute_processing_time(self, point: np.ndarray, arm: str) -> float:
-        base = self.L_base if arm == "L" else self.R_base
-        one_way_time = float(np.linalg.norm(np.asarray(point) - base))
+        home = self.L_home[:2] if arm == "L" else self.R_home[:2]
+        one_way_time = float(np.linalg.norm(np.asarray(point)[:2] - home))
         return 2 * one_way_time + self.base_operation_time
 
     # ----------------------------------------------------------
@@ -1115,12 +1137,14 @@ class RealCostPlanner(DualArmPlannerCore):
     def __init__(self,
                  urdf_path: str = _DEFAULT_URDF,
                  cost_table_path: str = _DEFAULT_COST_TABLE,
+                 q_home: Optional[np.ndarray] = None,
                  regions_config: Optional[List[Dict]] = None,
                  base_operation_time: float = 0.0):
         """
         参数:
             urdf_path: dual_arm_ik_xy_centered.urdf 文件路径。
             cost_table_path: dual_arm_cost.pkl 文件路径。
+            q_home: 机械臂处于回篮的初始配置。未指定时将使用和 cost table 构建时一样的默认姿态。
             regions_config: 采摘区域配置；为 None 时使用默认 B1-B6。
             base_operation_time: 固定处理时间。
         """
@@ -1128,6 +1152,40 @@ class RealCostPlanner(DualArmPlannerCore):
         if not os.path.isfile(urdf_path):
             raise FileNotFoundError(f"URDF not found: {urdf_path}")
         self.L_base, self.R_base = _load_urdf_base_xy(urdf_path)
+
+        # ---- 2. 加载 cost table ----
+        if not os.path.isfile(cost_table_path):
+            raise FileNotFoundError(f"Cost table not found: {cost_table_path}")
+        with open(cost_table_path, "rb") as f:
+            _ct = pickle.load(f)
+        self._left_cost:  Dict[str, float] = _ct["left_cost_table"]
+        self._right_cost: Dict[str, float] = _ct["right_cost_table"]
+        self._cost_table_path = cost_table_path
+        
+        # 尝试从 cost table 恢复 L_home/R_home
+        if "left_home_xy" in _ct and "right_home_xy" in _ct and q_home is None:
+            self.L_home = np.array(_ct["left_home_xy"], dtype=float)
+            self.R_home = np.array(_ct["right_home_xy"], dtype=float)
+        else:
+            # ---- 1.5 从 URDF + q_home 动态解析 L_home/R_home 末端位置 ----
+            if q_home is None:
+                q_home = np.array([0.10, -1.57, 0.23, -2.20, -1.40, -2.80, 0.0], dtype=float)
+                
+            try:
+                from tracikpy import TracIKSolver
+            except ImportError:
+                # 临时开发后备路径（通常通过 pip install dependency/tracikpy 即可正常导入）
+                import sys
+                fallback_dir = os.path.join(_REPO_ROOT, 'dependency/tracikpy/build/lib.linux-x86_64-cpython-38')
+                if fallback_dir not in sys.path:
+                    sys.path.append(fallback_dir)
+                from tracikpy import TracIKSolver
+                
+            solver_l = TracIKSolver(urdf_path, "vehicle_link", "left_arm_ee_link")
+            solver_r = TracIKSolver(urdf_path, "vehicle_link", "right_arm_ee_link")
+            self.L_home = solver_l.fk(q_home)[:2, 3]
+            self.R_home = solver_r.fk(q_home)[:2, 3]
+
         self._urdf_path = urdf_path
 
         # ---- 2. 加载 cost table ----

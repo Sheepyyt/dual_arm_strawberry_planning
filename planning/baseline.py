@@ -61,7 +61,9 @@ def example_with_custom_tasks():
     # 创建带有自定义机械臂位置的优化器实例
     L_base = np.array([-0.25, 0])
     R_base = np.array([0.25, 0])
-    optimizer = DualArmPlanner(L_base=L_base, R_base=R_base)
+    L_home = np.array([0.0721, 0.1955])
+    R_home = np.array([-0.0721, -0.1955])
+    optimizer = DualArmPlanner(L_base=L_base, R_base=R_base, L_home=L_home, R_home=R_home)
     
     # 自定义任务位置
     task_locations = [
