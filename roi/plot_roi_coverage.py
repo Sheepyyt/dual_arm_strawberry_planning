@@ -23,7 +23,7 @@ PLOT_CONFIG = {
     "body_y_max": 0.25,
 
     "figure_file": os.path.join(os.path.dirname(os.path.abspath(__file__)), "results/dual_arm_roi_coverage.png"),
-    "show_planning_regions": True,  # 控制是否显示 B1-B6 区域
+    "show_planning_regions": False,  # 控制是否显示 B1-B6 区域
 }
 
 # B1-B6 规划区域定义（与 dual_arm_planner.py 中的默认区域保持一致）
