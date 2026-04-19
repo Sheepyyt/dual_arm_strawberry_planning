@@ -309,6 +309,51 @@ def rect_mask(grid, roi):
 # ===========================================================================
 # Visualisation
 # ===========================================================================
+def _draw_arm_chain(ax, chain, q, color, label_prefix):
+    """
+    Draw the arm kinematic chain at configuration *q* on axes *ax*.
+
+    * Dashed lines (--) for links actuated by **prismatic** joints.
+    * Solid lines (-)  for links actuated by **revolute** joints.
+    * The EE fixed-joint segment is drawn as a thin dotted line.
+    * Joint positions are marked with diamond ``D`` (prismatic) or circle ``o`` (revolute).
+    """
+    pts = chain.fk_all_frames(q)          # (n_joints+2, 3)
+    xs, ys = pts[:, 0], pts[:, 1]         # XY projection
+
+    # Draw each link segment
+    for i in range(len(pts) - 1):
+        if i < chain.n_joints:
+            jtype = chain.joint_types[i]
+            if jtype == "prismatic":
+                style, lw = "--", 2.5
+            else:
+                style, lw = "-", 2.5
+        else:
+            # EE fixed joint
+            style, lw = ":", 1.5
+
+        seg_label = None
+        if i == 0:
+            seg_label = f"{label_prefix} chain"
+
+        ax.plot([xs[i], xs[i + 1]], [ys[i], ys[i + 1]],
+                linestyle=style, linewidth=lw, color=color,
+                zorder=6, label=seg_label)
+
+    # Mark joint positions
+    for i in range(chain.n_joints):
+        jtype = chain.joint_types[i]
+        marker = "D" if jtype == "prismatic" else "o"  # ◇ vs ●
+        ax.plot(xs[i + 1], ys[i + 1], marker=marker, markersize=5,
+                color=color, markeredgecolor="black", markeredgewidth=0.5,
+                zorder=7)
+
+    # Mark EE with a star
+    ax.plot(xs[-1], ys[-1], marker="x", markersize=7, color=color,
+            markeredgewidth=2, zorder=7)
+
+
 def _add_vehicle_and_bases(ax, T_left, T_right):
     """Draw vehicle body, arm bases, and ROI rectangles."""
     # Vehicle body
@@ -351,8 +396,14 @@ def _style_ax(ax, title):
 
 def plot_envelopes(grid_L, grid_R, grid_I,
                    grid_I_upper, grid_I_lower,
-                   T_left, T_right, save_path=None):
-    """Generate a multi-panel figure showing E_L, E_R, E_I and ROI intersections."""
+                   T_left, T_right, save_path=None,
+                   chain_L=None, chain_R=None, q_home=None):
+    """Generate a multi-panel figure showing E_L, E_R, E_I and ROI intersections.
+
+    If *chain_L*, *chain_R* and *q_home* are provided, each panel also draws
+    the kinematic chain of both arms at the home configuration.
+    Dashed lines = prismatic joints, solid lines = revolute joints.
+    """
 
     fig, axes = plt.subplots(2, 3, figsize=(24, 16))
 
@@ -366,6 +417,10 @@ def plot_envelopes(grid_L, grid_R, grid_I,
                   aspect="equal", cmap=cmap, alpha=alpha, zorder=0)
         _add_vehicle_and_bases(ax, T_left, T_right)
         _add_roi_rects(ax)
+        # Draw arm chains at q_home if provided
+        if chain_L is not None and chain_R is not None and q_home is not None:
+            _draw_arm_chain(ax, chain_L, q_home, color="#2850a0", label_prefix="Left")
+            _draw_arm_chain(ax, chain_R, q_home, color="#207840", label_prefix="Right")
         _style_ax(ax, title)
 
     cmap_blue = ListedColormap(["white", "#5b8bd6"])
@@ -404,6 +459,10 @@ def plot_envelopes(grid_L, grid_R, grid_I,
               aspect="equal", zorder=0)
     _add_vehicle_and_bases(ax, T_left, T_right)
     _add_roi_rects(ax)
+    # Draw arm chains on the overlay panel as well
+    if chain_L is not None and chain_R is not None and q_home is not None:
+        _draw_arm_chain(ax, chain_L, q_home, color="#2850a0", label_prefix="Left")
+        _draw_arm_chain(ax, chain_R, q_home, color="#207840", label_prefix="Right")
     _style_ax(ax, "Overlay: E_L (blue) / E_R (green) / E_I (red)")
     # Manual legend entries
     from matplotlib.lines import Line2D
@@ -411,6 +470,8 @@ def plot_envelopes(grid_L, grid_R, grid_I,
         Line2D([0], [0], color="#5b8bd6", lw=6, label="E_L only"),
         Line2D([0], [0], color="#6dbd7d", lw=6, label="E_R only"),
         Line2D([0], [0], color="#d65b5b", lw=6, label="E_I (danger)"),
+        Line2D([0], [0], color="gray", ls="--", lw=2, label="Prismatic joint"),
+        Line2D([0], [0], color="gray", ls="-", lw=2, label="Revolute joint"),
     ]
     ax.legend(handles=legend_el, loc="upper left", fontsize=7)
 
@@ -485,13 +546,20 @@ def main():
     print(f"\n  E_I ∩ ROI_upper cells: {n_IU}  ({n_IU * GRID_RES**2 * 1e4:.1f} cm²)")
     print(f"  E_I ∩ ROI_lower cells: {n_IL}  ({n_IL * GRID_RES**2 * 1e4:.1f} cm²)")
 
+    # ---- Home configuration (same seed as build_roi_table) ----
+    # 7-DOF home configuration (same as q_seed in build_roi_table.py):
+    # [j1_prismatic, j2_revolute, j3_prismatic, j4_revolute, j5_revolute, j6_revolute, j7_revolute]
+    q_home = np.array([0.10, 0.0, 0.23, -1.57, -2.40, -1.93, 0.0])
+
     # ---- Visualise ----
     fig_path = os.path.join(RESULT_DIR, "danger_zone_envelopes.png")
     print(f"\nGenerating visualisation → {fig_path}")
     plot_envelopes(grid_L, grid_R, grid_I,
                    grid_I_upper, grid_I_lower,
                    chain_L.T_base, chain_R.T_base,
-                   save_path=fig_path)
+                   save_path=fig_path,
+                   chain_L=chain_L, chain_R=chain_R,
+                   q_home=q_home)
 
     print("\nDone ✓")
 
