@@ -309,6 +309,88 @@ def rect_mask(grid, roi):
 # ===========================================================================
 # Visualisation
 # ===========================================================================
+def _draw_arm_schematic(ax, chain, q, color, label_prefix):
+    """
+    Draw a simplified schematic of the arm's XY-plane degrees of freedom.
+
+    The 7-DOF arm (prismatic–revolute–prismatic–revolute×4) is reduced to
+    the joints that **produce XY-plane motion**:
+
+      J1 (prismatic, y-axis)  → gray rail from base to max travel extent
+      J2, J4, J5, J6 (revolute, z-axis) → open circles with rotation arcs
+      Rigid links between adjacent revolute joints → solid line segments
+
+    J3 (prismatic along z = height adjustment) and J7 (end-effector
+    orientation) are absorbed into their adjacent links — they contribute
+    negligible XY displacement and would only add visual clutter.
+
+    The end-effector is shown as a filled triangle (▼).
+    """
+    pts = chain.fk_all_frames(q)          # (n_joints+2, 3)
+
+    # --- Key XY positions (simplified grouping) ---
+    p_base     = pts[0, :2]     # arm base (fixed mount on vehicle)
+    p_shoulder = pts[2, :2]     # J2 shoulder (current slider position)
+    p_elbow    = pts[4, :2]     # J4 elbow    (skip J3 vertical)
+    p_forearm  = pts[5, :2]     # J5 forearm
+    p_wrist    = pts[6, :2]     # J6 wrist
+    p_ee       = pts[-1, :2]    # EE (J7 + fixed combined)
+
+    # === 1) J1 prismatic rail ===
+    # Draw full rail structure: from base (fixed mount on vehicle)
+    # to the maximum J1 travel position.  The URDF has a fixed offset
+    # of ~14.8 cm from base_link to J1 origin (then -1 cm for J2 offset,
+    # giving ~13.9 cm visible gap); the rail travel adds another 23.4 cm.
+    # Drawing only the travel range would leave a visible gap between
+    # the base star and the rail.
+    q_hi = q.copy()
+    q_hi[0] = chain.joint_limits[0][1]
+    rail_end = chain.fk_all_frames(q_hi)[2, :2]   # max J1 extent
+
+    # Thick gray bar: base → max J1 travel
+    ax.plot([p_base[0], rail_end[0]], [p_base[1], rail_end[1]],
+            '-', color='#bbbbbb', lw=7, solid_capstyle='round', zorder=4)
+    ax.plot([p_base[0], rail_end[0]], [p_base[1], rail_end[1]],
+            '-', color='#888888', lw=7, solid_capstyle='round', zorder=4,
+            alpha=0.15)
+
+    # Slider position indicator (small square on the rail)
+    ax.plot(p_shoulder[0], p_shoulder[1], 's', color='#555555',
+            markersize=6, markeredgecolor='black', markeredgewidth=0.6,
+            zorder=4.5)
+
+    # === 2) Arm links — all solid, with white outline for visibility ===
+    links = [
+        (p_shoulder, p_elbow),    # upper arm  (J2 → J4)
+        (p_elbow,    p_forearm),  # forearm    (J4 → J5)
+        (p_forearm,  p_wrist),    # lower arm  (J5 → J6)
+        (p_wrist,    p_ee),       # hand       (J6 → EE)
+    ]
+    for i, (a, b) in enumerate(links):
+        lbl = label_prefix if i == 0 else None
+        ax.plot([a[0], b[0]], [a[1], b[1]], '-', color='white', lw=4.5,
+                solid_capstyle='round', zorder=5.9)
+        ax.plot([a[0], b[0]], [a[1], b[1]], '-', color=color, lw=3,
+                solid_capstyle='round', zorder=6, label=lbl)
+
+    # === 3) Revolute joints — open circles with small rotation arcs ===
+    _ARC_RADIUS = 0.018           # metres – size of the rotation indicator
+    _ARC_SPAN   = np.pi * 1.6    # radians (~288°) – visible arc sweep
+    for p in [p_shoulder, p_elbow, p_forearm, p_wrist]:
+        # Open circle marker
+        ax.plot(p[0], p[1], 'o', color='white', markersize=7,
+                markeredgecolor=color, markeredgewidth=2, zorder=7)
+        # Small arc arrow indicating rotation
+        theta = np.linspace(np.pi / 6, np.pi / 6 + _ARC_SPAN, 25)
+        ax.plot(p[0] + _ARC_RADIUS * np.cos(theta),
+                p[1] + _ARC_RADIUS * np.sin(theta),
+                '-', color=color, lw=0.9, alpha=0.55, zorder=7.5)
+
+    # === 4) End-effector — filled triangle ===
+    ax.plot(p_ee[0], p_ee[1], 'v', color=color, markersize=9,
+            markeredgecolor='black', markeredgewidth=0.8, zorder=7.5)
+
+
 def _add_vehicle_and_bases(ax, T_left, T_right):
     """Draw vehicle body, arm bases, and ROI rectangles."""
     # Vehicle body
@@ -351,7 +433,7 @@ def _style_ax(ax, title):
 
 def plot_envelopes(grid_L, grid_R, grid_I,
                    grid_I_upper, grid_I_lower,
-                   chain_L, chain_R, save_path=None):
+                   T_left, T_right, save_path=None):
     """Generate a multi-panel figure showing E_L, E_R, E_I and ROI intersections."""
 
     fig, axes = plt.subplots(2, 3, figsize=(24, 16))
@@ -366,6 +448,12 @@ def plot_envelopes(grid_L, grid_R, grid_I,
                   aspect="equal", cmap=cmap, alpha=alpha, zorder=0)
         _add_vehicle_and_bases(ax, chain_L.T_base, chain_R.T_base)
         _add_roi_rects(ax)
+        # Draw simplified arm schematic if provided
+        if chain_L is not None and chain_R is not None and _q_L is not None:
+            _draw_arm_schematic(ax, chain_L, _q_L, color="#2850a0",
+                                label_prefix="Left")
+            _draw_arm_schematic(ax, chain_R, _q_R, color="#207840",
+                                label_prefix="Right")
         _style_ax(ax, title)
 
     cmap_blue = ListedColormap(["white", "#5b8bd6"])
@@ -404,6 +492,12 @@ def plot_envelopes(grid_L, grid_R, grid_I,
               aspect="equal", zorder=0)
     _add_vehicle_and_bases(ax, chain_L.T_base, chain_R.T_base)
     _add_roi_rects(ax)
+    # Draw simplified arm schematic on the overlay panel as well
+    if chain_L is not None and chain_R is not None and _q_L is not None:
+        _draw_arm_schematic(ax, chain_L, _q_L, color="#2850a0",
+                            label_prefix="Left")
+        _draw_arm_schematic(ax, chain_R, _q_R, color="#207840",
+                            label_prefix="Right")
     _style_ax(ax, "Overlay: E_L (blue) / E_R (green) / E_I (red)")
     # Manual legend entries
     from matplotlib.lines import Line2D
@@ -411,6 +505,17 @@ def plot_envelopes(grid_L, grid_R, grid_I,
         Line2D([0], [0], color="#5b8bd6", lw=6, label="E_L only"),
         Line2D([0], [0], color="#6dbd7d", lw=6, label="E_R only"),
         Line2D([0], [0], color="#d65b5b", lw=6, label="E_I (danger)"),
+        Line2D([0], [0], color="#bbb", lw=5, solid_capstyle="round",
+               label="Slide rail (J1)"),
+        Line2D([0], [0], color="#555", ls="None", marker="s",
+               markersize=5, markeredgecolor="black", markeredgewidth=0.5,
+               label="Slider position"),
+        Line2D([0], [0], color="gray", ls="-", lw=2.5,
+               marker="o", markerfacecolor="white", markeredgecolor="gray",
+               markersize=5, markeredgewidth=1.5,
+               label="Link + revolute joint"),
+        Line2D([0], [0], color="gray", ls="None", marker="v",
+               markersize=7, label="End-effector"),
     ]
     ax.legend(handles=legend_el, loc="upper left", fontsize=7)
 
@@ -490,15 +595,15 @@ def main():
         n_I = np.count_nonzero(grid_I.grid)
         print(f"  E_I cells: {n_I}  ({n_I * GRID_RES**2 * 1e4:.1f} cm²)")
 
-        # ---- Intersect with ROI upper / lower ----
-        mask_upper = rect_mask(grid_I, ROI_UPPER)
-        mask_lower = rect_mask(grid_I, ROI_LOWER)
-        grid_I_upper = grid_I.grid & mask_upper
-        grid_I_lower = grid_I.grid & mask_lower
-        n_IU = np.count_nonzero(grid_I_upper)
-        n_IL = np.count_nonzero(grid_I_lower)
-        print(f"\n  E_I ∩ ROI_upper cells: {n_IU}  ({n_IU * GRID_RES**2 * 1e4:.1f} cm²)")
-        print(f"  E_I ∩ ROI_lower cells: {n_IL}  ({n_IL * GRID_RES**2 * 1e4:.1f} cm²)")
+    # ---- Intersect with ROI upper / lower ----
+    mask_upper = rect_mask(grid_I, ROI_UPPER)
+    mask_lower = rect_mask(grid_I, ROI_LOWER)
+    grid_I_upper = grid_I.grid & mask_upper
+    grid_I_lower = grid_I.grid & mask_lower
+    n_IU = np.count_nonzero(grid_I_upper)
+    n_IL = np.count_nonzero(grid_I_lower)
+    print(f"\n  E_I ∩ ROI_upper cells: {n_IU}  ({n_IU * GRID_RES**2 * 1e4:.1f} cm²)")
+    print(f"  E_I ∩ ROI_lower cells: {n_IL}  ({n_IL * GRID_RES**2 * 1e4:.1f} cm²)")
 
         # ---- Save Data ----
         print(f"\nSaving danger zone data → {data_path}")
@@ -518,7 +623,7 @@ def main():
     print(f"\nGenerating visualisation → {fig_path}")
     plot_envelopes(grid_L, grid_R, grid_I,
                    grid_I_upper, grid_I_lower,
-                   chain_L, chain_R,
+                   chain_L.T_base, chain_R.T_base,
                    save_path=fig_path)
 
     print("\nDone ✓")
