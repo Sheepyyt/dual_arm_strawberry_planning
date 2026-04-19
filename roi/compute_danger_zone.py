@@ -316,7 +316,7 @@ def _draw_arm_schematic(ax, chain, q, color, label_prefix):
     The 7-DOF arm (prismatic–revolute–prismatic–revolute×4) is reduced to
     the joints that **produce XY-plane motion**:
 
-      J1 (prismatic, y-axis)  → gray rail showing the slide range
+      J1 (prismatic, y-axis)  → gray rail from base to max travel extent
       J2, J4, J5, J6 (revolute, z-axis) → open circles with rotation arcs
       Rigid links between adjacent revolute joints → solid line segments
 
@@ -329,25 +329,35 @@ def _draw_arm_schematic(ax, chain, q, color, label_prefix):
     pts = chain.fk_all_frames(q)          # (n_joints+2, 3)
 
     # --- Key XY positions (simplified grouping) ---
-    p_shoulder = pts[2, :2]     # J2 shoulder (≈ J1 slider, 1 cm apart)
+    p_base     = pts[0, :2]     # arm base (fixed mount on vehicle)
+    p_shoulder = pts[2, :2]     # J2 shoulder (current slider position)
     p_elbow    = pts[4, :2]     # J4 elbow    (skip J3 vertical)
     p_forearm  = pts[5, :2]     # J5 forearm
     p_wrist    = pts[6, :2]     # J6 wrist
     p_ee       = pts[-1, :2]    # EE (J7 + fixed combined)
 
     # === 1) J1 prismatic rail ===
-    # Compute shoulder position at J1 limits to show the slide range.
-    q_lo = q.copy(); q_lo[0] = chain.joint_limits[0][0]
-    q_hi = q.copy(); q_hi[0] = chain.joint_limits[0][1]
-    rail_lo = chain.fk_all_frames(q_lo)[2, :2]
-    rail_hi = chain.fk_all_frames(q_hi)[2, :2]
+    # Draw full rail structure: from base (fixed mount on vehicle)
+    # to the maximum J1 travel position.  The URDF has a fixed offset
+    # of ~14.8 cm from base_link to J1 origin (then -1 cm for J2 offset,
+    # giving ~13.9 cm visible gap); the rail travel adds another 23.4 cm.
+    # Drawing only the travel range would leave a visible gap between
+    # the base star and the rail.
+    q_hi = q.copy()
+    q_hi[0] = chain.joint_limits[0][1]
+    rail_end = chain.fk_all_frames(q_hi)[2, :2]   # max J1 extent
 
-    # Thick gray bar representing the rail
-    ax.plot([rail_lo[0], rail_hi[0]], [rail_lo[1], rail_hi[1]],
+    # Thick gray bar: base → max J1 travel
+    ax.plot([p_base[0], rail_end[0]], [p_base[1], rail_end[1]],
             '-', color='#bbbbbb', lw=7, solid_capstyle='round', zorder=4)
-    ax.plot([rail_lo[0], rail_hi[0]], [rail_lo[1], rail_hi[1]],
+    ax.plot([p_base[0], rail_end[0]], [p_base[1], rail_end[1]],
             '-', color='#888888', lw=7, solid_capstyle='round', zorder=4,
             alpha=0.15)
+
+    # Slider position indicator (small square on the rail)
+    ax.plot(p_shoulder[0], p_shoulder[1], 's', color='#555555',
+            markersize=6, markeredgecolor='black', markeredgewidth=0.6,
+            zorder=4.5)
 
     # === 2) Arm links — all solid, with white outline for visibility ===
     links = [
@@ -424,17 +434,26 @@ def _style_ax(ax, title):
 def plot_envelopes(grid_L, grid_R, grid_I,
                    grid_I_upper, grid_I_lower,
                    T_left, T_right, save_path=None,
-                   chain_L=None, chain_R=None, q_home=None):
+                   chain_L=None, chain_R=None,
+                   q_home=None, q_home_L=None, q_home_R=None):
     """Generate a multi-panel figure showing E_L, E_R, E_I and ROI intersections.
 
-    If *chain_L*, *chain_R* and *q_home* are provided, each panel also draws
-    a simplified schematic of both arms at the home configuration, showing
-    only the XY-plane degrees of freedom:
-      - J1 prismatic slide → gray rail
+    If *chain_L*, *chain_R* and arm configurations are provided, each panel
+    draws a simplified schematic of both arms showing only XY-plane DOFs:
+      - J1 prismatic slide → gray rail (base to max travel)
       - J2/J4/J5/J6 revolute → open circles with rotation arcs
       - Rigid links → solid lines
       - End-effector → filled triangle
+
+    Parameters *q_home_L* and *q_home_R* allow specifying different
+    configurations for the two arms so they can be drawn in clearly
+    separated, non-overlapping poses.  If only *q_home* is given, both
+    arms use the same configuration.
     """
+
+    # Resolve per-arm configurations
+    _q_L = q_home_L if q_home_L is not None else q_home
+    _q_R = q_home_R if q_home_R is not None else q_home
 
     fig, axes = plt.subplots(2, 3, figsize=(24, 16))
 
@@ -448,11 +467,11 @@ def plot_envelopes(grid_L, grid_R, grid_I,
                   aspect="equal", cmap=cmap, alpha=alpha, zorder=0)
         _add_vehicle_and_bases(ax, T_left, T_right)
         _add_roi_rects(ax)
-        # Draw simplified arm schematic at q_home if provided
-        if chain_L is not None and chain_R is not None and q_home is not None:
-            _draw_arm_schematic(ax, chain_L, q_home, color="#2850a0",
+        # Draw simplified arm schematic if provided
+        if chain_L is not None and chain_R is not None and _q_L is not None:
+            _draw_arm_schematic(ax, chain_L, _q_L, color="#2850a0",
                                 label_prefix="Left")
-            _draw_arm_schematic(ax, chain_R, q_home, color="#207840",
+            _draw_arm_schematic(ax, chain_R, _q_R, color="#207840",
                                 label_prefix="Right")
         _style_ax(ax, title)
 
@@ -493,10 +512,10 @@ def plot_envelopes(grid_L, grid_R, grid_I,
     _add_vehicle_and_bases(ax, T_left, T_right)
     _add_roi_rects(ax)
     # Draw simplified arm schematic on the overlay panel as well
-    if chain_L is not None and chain_R is not None and q_home is not None:
-        _draw_arm_schematic(ax, chain_L, q_home, color="#2850a0",
+    if chain_L is not None and chain_R is not None and _q_L is not None:
+        _draw_arm_schematic(ax, chain_L, _q_L, color="#2850a0",
                             label_prefix="Left")
-        _draw_arm_schematic(ax, chain_R, q_home, color="#207840",
+        _draw_arm_schematic(ax, chain_R, _q_R, color="#207840",
                             label_prefix="Right")
     _style_ax(ax, "Overlay: E_L (blue) / E_R (green) / E_I (red)")
     # Manual legend entries
@@ -507,6 +526,9 @@ def plot_envelopes(grid_L, grid_R, grid_I,
         Line2D([0], [0], color="#d65b5b", lw=6, label="E_I (danger)"),
         Line2D([0], [0], color="#bbb", lw=5, solid_capstyle="round",
                label="Slide rail (J1)"),
+        Line2D([0], [0], color="#555", ls="None", marker="s",
+               markersize=5, markeredgecolor="black", markeredgewidth=0.5,
+               label="Slider position"),
         Line2D([0], [0], color="gray", ls="-", lw=2.5,
                marker="o", markerfacecolor="white", markeredgecolor="gray",
                markersize=5, markeredgewidth=1.5,
@@ -592,6 +614,16 @@ def main():
     # [j1_prismatic, j2_revolute, j3_prismatic, j4_revolute, j5_revolute, j6_revolute, j7_revolute]
     q_home = np.array([0.10, 0.0, 0.23, -1.57, -2.40, -1.93, 0.0])
 
+    # ---- Visualisation poses ----
+    # With j2=0 both arms extend toward the centre and visually overlap.
+    # Setting j2=-1.2 makes the left arm extend toward +y and the right
+    # arm (whose base is yawed 180°) extend toward -y, giving a clear
+    # visual separation while preserving all link lengths.
+    q_vis_L = q_home.copy()
+    q_vis_L[1] = -1.2
+    q_vis_R = q_home.copy()
+    q_vis_R[1] = -1.2
+
     # ---- Visualise ----
     fig_path = os.path.join(RESULT_DIR, "danger_zone_envelopes.png")
     print(f"\nGenerating visualisation → {fig_path}")
@@ -600,7 +632,7 @@ def main():
                    chain_L.T_base, chain_R.T_base,
                    save_path=fig_path,
                    chain_L=chain_L, chain_R=chain_R,
-                   q_home=q_home)
+                   q_home_L=q_vis_L, q_home_R=q_vis_R)
 
     print("\nDone ✓")
 
