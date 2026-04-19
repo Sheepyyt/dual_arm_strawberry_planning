@@ -433,8 +433,27 @@ def _style_ax(ax, title):
 
 def plot_envelopes(grid_L, grid_R, grid_I,
                    grid_I_upper, grid_I_lower,
-                   T_left, T_right, save_path=None):
-    """Generate a multi-panel figure showing E_L, E_R, E_I and ROI intersections."""
+                   T_left, T_right, save_path=None,
+                   chain_L=None, chain_R=None,
+                   q_home=None, q_home_L=None, q_home_R=None):
+    """Generate a multi-panel figure showing E_L, E_R, E_I and ROI intersections.
+
+    If *chain_L*, *chain_R* and arm configurations are provided, each panel
+    draws a simplified schematic of both arms showing only XY-plane DOFs:
+      - J1 prismatic slide → gray rail (base to max travel)
+      - J2/J4/J5/J6 revolute → open circles with rotation arcs
+      - Rigid links → solid lines
+      - End-effector → filled triangle
+
+    Parameters *q_home_L* and *q_home_R* allow specifying different
+    configurations for the two arms so they can be drawn in clearly
+    separated, non-overlapping poses.  If only *q_home* is given, both
+    arms use the same configuration.
+    """
+
+    # Resolve per-arm configurations
+    _q_L = q_home_L if q_home_L is not None else q_home
+    _q_R = q_home_R if q_home_R is not None else q_home
 
     fig, axes = plt.subplots(2, 3, figsize=(24, 16))
 
@@ -446,7 +465,7 @@ def plot_envelopes(grid_L, grid_R, grid_I,
         # grid_data is (nx, ny); imshow expects (rows=ny, cols=nx)
         ax.imshow(grid_data.T, origin="lower", extent=extent,
                   aspect="equal", cmap=cmap, alpha=alpha, zorder=0)
-        _add_vehicle_and_bases(ax, chain_L.T_base, chain_R.T_base)
+        _add_vehicle_and_bases(ax, T_left, T_right)
         _add_roi_rects(ax)
         # Draw simplified arm schematic if provided
         if chain_L is not None and chain_R is not None and _q_L is not None:
@@ -490,7 +509,7 @@ def plot_envelopes(grid_L, grid_R, grid_I,
     ax = axes[1, 0]
     ax.imshow(np.transpose(overlay, (1, 0, 2)), origin="lower", extent=extent,
               aspect="equal", zorder=0)
-    _add_vehicle_and_bases(ax, chain_L.T_base, chain_R.T_base)
+    _add_vehicle_and_bases(ax, T_left, T_right)
     _add_roi_rects(ax)
     # Draw simplified arm schematic on the overlay panel as well
     if chain_L is not None and chain_R is not None and _q_L is not None:
@@ -595,15 +614,11 @@ def main():
         n_I = np.count_nonzero(grid_I.grid)
         print(f"  E_I cells: {n_I}  ({n_I * GRID_RES**2 * 1e4:.1f} cm²)")
 
-    # ---- Intersect with ROI upper / lower ----
-    mask_upper = rect_mask(grid_I, ROI_UPPER)
-    mask_lower = rect_mask(grid_I, ROI_LOWER)
-    grid_I_upper = grid_I.grid & mask_upper
-    grid_I_lower = grid_I.grid & mask_lower
-    n_IU = np.count_nonzero(grid_I_upper)
-    n_IL = np.count_nonzero(grid_I_lower)
-    print(f"\n  E_I ∩ ROI_upper cells: {n_IU}  ({n_IU * GRID_RES**2 * 1e4:.1f} cm²)")
-    print(f"  E_I ∩ ROI_lower cells: {n_IL}  ({n_IL * GRID_RES**2 * 1e4:.1f} cm²)")
+        # ---- Intersect with ROI upper / lower ----
+        mask_upper = rect_mask(grid_I, ROI_UPPER)
+        mask_lower = rect_mask(grid_I, ROI_LOWER)
+        grid_I_upper = grid_I.grid & mask_upper
+        grid_I_lower = grid_I.grid & mask_lower
 
         # ---- Save Data ----
         print(f"\nSaving danger zone data → {data_path}")
@@ -618,13 +633,35 @@ def main():
             res=np.array([GRID_RES])
         )
 
+    n_IU = np.count_nonzero(grid_I_upper)
+    n_IL = np.count_nonzero(grid_I_lower)
+    print(f"\n  E_I ∩ ROI_upper cells: {n_IU}  ({n_IU * GRID_RES**2 * 1e4:.1f} cm²)")
+    print(f"  E_I ∩ ROI_lower cells: {n_IL}  ({n_IL * GRID_RES**2 * 1e4:.1f} cm²)")
+
+    # ---- Home configuration (same seed as build_roi_table) ----
+    # 7-DOF home configuration (same as q_seed in build_roi_table.py):
+    # [j1_prismatic, j2_revolute, j3_prismatic, j4_revolute, j5_revolute, j6_revolute, j7_revolute]
+    q_home = np.array([0.10, 0.0, 0.23, -1.57, -2.40, -1.93, 0.0])
+
+    # ---- Visualisation poses ----
+    # With j2=0 both arms extend toward the centre and visually overlap.
+    # Setting j2=-1.2 makes the left arm extend toward +y and the right
+    # arm (whose base is yawed 180°) extend toward -y, giving a clear
+    # visual separation while preserving all link lengths.
+    q_vis_L = q_home.copy()
+    q_vis_L[1] = -1.2
+    q_vis_R = q_home.copy()
+    q_vis_R[1] = -1.2
+
     # ---- Visualise ----
     fig_path = os.path.join(RESULT_DIR, "danger_zone_envelopes.png")
     print(f"\nGenerating visualisation → {fig_path}")
     plot_envelopes(grid_L, grid_R, grid_I,
                    grid_I_upper, grid_I_lower,
                    chain_L.T_base, chain_R.T_base,
-                   save_path=fig_path)
+                   save_path=fig_path,
+                   chain_L=chain_L, chain_R=chain_R,
+                   q_home_L=q_vis_L, q_home_R=q_vis_R)
 
     print("\nDone ✓")
 
