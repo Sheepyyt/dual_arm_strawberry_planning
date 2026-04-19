@@ -309,49 +309,76 @@ def rect_mask(grid, roi):
 # ===========================================================================
 # Visualisation
 # ===========================================================================
-def _draw_arm_chain(ax, chain, q, color, label_prefix):
+def _draw_arm_schematic(ax, chain, q, color, label_prefix):
     """
-    Draw the arm kinematic chain at configuration *q* on axes *ax*.
+    Draw a simplified schematic of the arm's XY-plane degrees of freedom.
 
-    * Dashed lines (--) for links actuated by **prismatic** joints.
-    * Solid lines (-)  for links actuated by **revolute** joints.
-    * The EE fixed-joint segment is drawn as a thin dotted line.
-    * Joint positions are marked with diamond ``D`` (prismatic) or circle ``o`` (revolute).
+    The 7-DOF arm (prismatic–revolute–prismatic–revolute×4) is reduced to
+    the joints that **produce XY-plane motion**:
+
+      J1 (prismatic, y-axis)  → gray rail showing the slide range
+      J2, J4, J5, J6 (revolute, z-axis) → open circles with rotation arcs
+      Rigid links between adjacent revolute joints → solid line segments
+
+    J3 (prismatic along z = height adjustment) and J7 (end-effector
+    orientation) are absorbed into their adjacent links — they contribute
+    negligible XY displacement and would only add visual clutter.
+
+    The end-effector is shown as a filled triangle (▼).
     """
     pts = chain.fk_all_frames(q)          # (n_joints+2, 3)
-    xs, ys = pts[:, 0], pts[:, 1]         # XY projection
 
-    # Draw each link segment
-    for i in range(len(pts) - 1):
-        if i < chain.n_joints:
-            jtype = chain.joint_types[i]
-            if jtype == "prismatic":
-                style, lw = "--", 2.5
-            else:
-                style, lw = "-", 2.5
-        else:
-            # EE fixed joint
-            style, lw = ":", 1.5
+    # --- Key XY positions (simplified grouping) ---
+    p_shoulder = pts[2, :2]     # J2 shoulder (≈ J1 slider, 1 cm apart)
+    p_elbow    = pts[4, :2]     # J4 elbow    (skip J3 vertical)
+    p_forearm  = pts[5, :2]     # J5 forearm
+    p_wrist    = pts[6, :2]     # J6 wrist
+    p_ee       = pts[-1, :2]    # EE (J7 + fixed combined)
 
-        seg_label = None
-        if i == 0:
-            seg_label = f"{label_prefix} chain"
+    # === 1) J1 prismatic rail ===
+    # Compute shoulder position at J1 limits to show the slide range.
+    q_lo = q.copy(); q_lo[0] = chain.joint_limits[0][0]
+    q_hi = q.copy(); q_hi[0] = chain.joint_limits[0][1]
+    rail_lo = chain.fk_all_frames(q_lo)[2, :2]
+    rail_hi = chain.fk_all_frames(q_hi)[2, :2]
 
-        ax.plot([xs[i], xs[i + 1]], [ys[i], ys[i + 1]],
-                linestyle=style, linewidth=lw, color=color,
-                zorder=6, label=seg_label)
+    # Thick gray bar representing the rail
+    ax.plot([rail_lo[0], rail_hi[0]], [rail_lo[1], rail_hi[1]],
+            '-', color='#bbbbbb', lw=7, solid_capstyle='round', zorder=4)
+    ax.plot([rail_lo[0], rail_hi[0]], [rail_lo[1], rail_hi[1]],
+            '-', color='#888888', lw=7, solid_capstyle='round', zorder=4,
+            alpha=0.15)
 
-    # Mark joint positions
-    for i in range(chain.n_joints):
-        jtype = chain.joint_types[i]
-        marker = "D" if jtype == "prismatic" else "o"  # ◇ vs ●
-        ax.plot(xs[i + 1], ys[i + 1], marker=marker, markersize=5,
-                color=color, markeredgecolor="black", markeredgewidth=0.5,
-                zorder=7)
+    # === 2) Arm links — all solid, with white outline for visibility ===
+    links = [
+        (p_shoulder, p_elbow),    # upper arm  (J2 → J4)
+        (p_elbow,    p_forearm),  # forearm    (J4 → J5)
+        (p_forearm,  p_wrist),    # lower arm  (J5 → J6)
+        (p_wrist,    p_ee),       # hand       (J6 → EE)
+    ]
+    for i, (a, b) in enumerate(links):
+        lbl = label_prefix if i == 0 else None
+        ax.plot([a[0], b[0]], [a[1], b[1]], '-', color='white', lw=4.5,
+                solid_capstyle='round', zorder=5.9)
+        ax.plot([a[0], b[0]], [a[1], b[1]], '-', color=color, lw=3,
+                solid_capstyle='round', zorder=6, label=lbl)
 
-    # Mark EE with a star
-    ax.plot(xs[-1], ys[-1], marker="x", markersize=7, color=color,
-            markeredgewidth=2, zorder=7)
+    # === 3) Revolute joints — open circles with small rotation arcs ===
+    _ARC_RADIUS = 0.018           # metres – size of the rotation indicator
+    _ARC_SPAN   = np.pi * 1.6    # radians (~288°) – visible arc sweep
+    for p in [p_shoulder, p_elbow, p_forearm, p_wrist]:
+        # Open circle marker
+        ax.plot(p[0], p[1], 'o', color='white', markersize=7,
+                markeredgecolor=color, markeredgewidth=2, zorder=7)
+        # Small arc arrow indicating rotation
+        theta = np.linspace(np.pi / 6, np.pi / 6 + _ARC_SPAN, 25)
+        ax.plot(p[0] + _ARC_RADIUS * np.cos(theta),
+                p[1] + _ARC_RADIUS * np.sin(theta),
+                '-', color=color, lw=0.9, alpha=0.55, zorder=7.5)
+
+    # === 4) End-effector — filled triangle ===
+    ax.plot(p_ee[0], p_ee[1], 'v', color=color, markersize=9,
+            markeredgecolor='black', markeredgewidth=0.8, zorder=7.5)
 
 
 def _add_vehicle_and_bases(ax, T_left, T_right):
@@ -401,8 +428,12 @@ def plot_envelopes(grid_L, grid_R, grid_I,
     """Generate a multi-panel figure showing E_L, E_R, E_I and ROI intersections.
 
     If *chain_L*, *chain_R* and *q_home* are provided, each panel also draws
-    the kinematic chain of both arms at the home configuration.
-    Dashed lines = prismatic joints, solid lines = revolute joints.
+    a simplified schematic of both arms at the home configuration, showing
+    only the XY-plane degrees of freedom:
+      - J1 prismatic slide → gray rail
+      - J2/J4/J5/J6 revolute → open circles with rotation arcs
+      - Rigid links → solid lines
+      - End-effector → filled triangle
     """
 
     fig, axes = plt.subplots(2, 3, figsize=(24, 16))
@@ -417,10 +448,12 @@ def plot_envelopes(grid_L, grid_R, grid_I,
                   aspect="equal", cmap=cmap, alpha=alpha, zorder=0)
         _add_vehicle_and_bases(ax, T_left, T_right)
         _add_roi_rects(ax)
-        # Draw arm chains at q_home if provided
+        # Draw simplified arm schematic at q_home if provided
         if chain_L is not None and chain_R is not None and q_home is not None:
-            _draw_arm_chain(ax, chain_L, q_home, color="#2850a0", label_prefix="Left")
-            _draw_arm_chain(ax, chain_R, q_home, color="#207840", label_prefix="Right")
+            _draw_arm_schematic(ax, chain_L, q_home, color="#2850a0",
+                                label_prefix="Left")
+            _draw_arm_schematic(ax, chain_R, q_home, color="#207840",
+                                label_prefix="Right")
         _style_ax(ax, title)
 
     cmap_blue = ListedColormap(["white", "#5b8bd6"])
@@ -459,10 +492,12 @@ def plot_envelopes(grid_L, grid_R, grid_I,
               aspect="equal", zorder=0)
     _add_vehicle_and_bases(ax, T_left, T_right)
     _add_roi_rects(ax)
-    # Draw arm chains on the overlay panel as well
+    # Draw simplified arm schematic on the overlay panel as well
     if chain_L is not None and chain_R is not None and q_home is not None:
-        _draw_arm_chain(ax, chain_L, q_home, color="#2850a0", label_prefix="Left")
-        _draw_arm_chain(ax, chain_R, q_home, color="#207840", label_prefix="Right")
+        _draw_arm_schematic(ax, chain_L, q_home, color="#2850a0",
+                            label_prefix="Left")
+        _draw_arm_schematic(ax, chain_R, q_home, color="#207840",
+                            label_prefix="Right")
     _style_ax(ax, "Overlay: E_L (blue) / E_R (green) / E_I (red)")
     # Manual legend entries
     from matplotlib.lines import Line2D
@@ -470,8 +505,14 @@ def plot_envelopes(grid_L, grid_R, grid_I,
         Line2D([0], [0], color="#5b8bd6", lw=6, label="E_L only"),
         Line2D([0], [0], color="#6dbd7d", lw=6, label="E_R only"),
         Line2D([0], [0], color="#d65b5b", lw=6, label="E_I (danger)"),
-        Line2D([0], [0], color="gray", ls="--", lw=2, label="Prismatic joint"),
-        Line2D([0], [0], color="gray", ls="-", lw=2, label="Revolute joint"),
+        Line2D([0], [0], color="#bbb", lw=5, solid_capstyle="round",
+               label="Slide rail (J1)"),
+        Line2D([0], [0], color="gray", ls="-", lw=2.5,
+               marker="o", markerfacecolor="white", markeredgecolor="gray",
+               markersize=5, markeredgewidth=1.5,
+               label="Link + revolute joint"),
+        Line2D([0], [0], color="gray", ls="None", marker="v",
+               markersize=7, label="End-effector"),
     ]
     ax.legend(handles=legend_el, loc="upper left", fontsize=7)
 
