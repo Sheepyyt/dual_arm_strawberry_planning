@@ -351,7 +351,7 @@ def _style_ax(ax, title):
 
 def plot_envelopes(grid_L, grid_R, grid_I,
                    grid_I_upper, grid_I_lower,
-                   T_left, T_right, save_path=None):
+                   chain_L, chain_R, save_path=None):
     """Generate a multi-panel figure showing E_L, E_R, E_I and ROI intersections."""
 
     fig, axes = plt.subplots(2, 3, figsize=(24, 16))
@@ -364,7 +364,7 @@ def plot_envelopes(grid_L, grid_R, grid_I,
         # grid_data is (nx, ny); imshow expects (rows=ny, cols=nx)
         ax.imshow(grid_data.T, origin="lower", extent=extent,
                   aspect="equal", cmap=cmap, alpha=alpha, zorder=0)
-        _add_vehicle_and_bases(ax, T_left, T_right)
+        _add_vehicle_and_bases(ax, chain_L.T_base, chain_R.T_base)
         _add_roi_rects(ax)
         _style_ax(ax, title)
 
@@ -402,7 +402,7 @@ def plot_envelopes(grid_L, grid_R, grid_I,
     ax = axes[1, 0]
     ax.imshow(np.transpose(overlay, (1, 0, 2)), origin="lower", extent=extent,
               aspect="equal", zorder=0)
-    _add_vehicle_and_bases(ax, T_left, T_right)
+    _add_vehicle_and_bases(ax, chain_L.T_base, chain_R.T_base)
     _add_roi_rects(ax)
     _style_ax(ax, "Overlay: E_L (blue) / E_R (green) / E_I (red)")
     # Manual legend entries
@@ -457,40 +457,68 @@ def main():
         return OccupancyGrid(GRID_X_MIN, GRID_X_MAX,
                              GRID_Y_MIN, GRID_Y_MAX, GRID_RES)
 
-    # ---- Compute envelopes ----
-    print(f"\nSampling {N_SAMPLES} configs per arm …")
-    grid_L = compute_swept_envelope(chain_L, make_grid, N_SAMPLES, LINK_RADIUS,
-                                    label="Left")
-    grid_R = compute_swept_envelope(chain_R, make_grid, N_SAMPLES, LINK_RADIUS,
-                                    label="Right")
+    os.makedirs(RESULT_DIR, exist_ok=True)
+    data_path = os.path.join(RESULT_DIR, "danger_zone_data.npz")
 
-    n_L = np.count_nonzero(grid_L.grid)
-    n_R = np.count_nonzero(grid_R.grid)
-    print(f"\n  E_L cells: {n_L}  ({n_L * GRID_RES**2 * 1e4:.1f} cm²)")
-    print(f"  E_R cells: {n_R}  ({n_R * GRID_RES**2 * 1e4:.1f} cm²)")
+    if os.path.exists(data_path):
+        print(f"\nLoading existing danger zone data from {data_path}")
+        data = np.load(data_path)
+        grid_L = make_grid()
+        grid_L.grid = data["grid_L"]
+        grid_R = make_grid()
+        grid_R.grid = data["grid_R"]
+        grid_I = make_grid()
+        grid_I.grid = data["grid_I"]
+        grid_I_upper = data["grid_I_upper"]
+        grid_I_lower = data["grid_I_lower"]
+    else:
+        # ---- Compute envelopes ----
+        print(f"\nSampling {N_SAMPLES} configs per arm …")
+        grid_L = compute_swept_envelope(chain_L, make_grid, N_SAMPLES, LINK_RADIUS,
+                                        label="Left")
+        grid_R = compute_swept_envelope(chain_R, make_grid, N_SAMPLES, LINK_RADIUS,
+                                        label="Right")
 
-    # ---- Danger zone ----
-    grid_I = make_grid()
-    grid_I.grid = grid_L.grid & grid_R.grid
-    n_I = np.count_nonzero(grid_I.grid)
-    print(f"  E_I cells: {n_I}  ({n_I * GRID_RES**2 * 1e4:.1f} cm²)")
+        n_L = np.count_nonzero(grid_L.grid)
+        n_R = np.count_nonzero(grid_R.grid)
+        print(f"\n  E_L cells: {n_L}  ({n_L * GRID_RES**2 * 1e4:.1f} cm²)")
+        print(f"  E_R cells: {n_R}  ({n_R * GRID_RES**2 * 1e4:.1f} cm²)")
 
-    # ---- Intersect with ROI upper / lower ----
-    mask_upper = rect_mask(grid_I, ROI_UPPER)
-    mask_lower = rect_mask(grid_I, ROI_LOWER)
-    grid_I_upper = grid_I.grid & mask_upper
-    grid_I_lower = grid_I.grid & mask_lower
-    n_IU = np.count_nonzero(grid_I_upper)
-    n_IL = np.count_nonzero(grid_I_lower)
-    print(f"\n  E_I ∩ ROI_upper cells: {n_IU}  ({n_IU * GRID_RES**2 * 1e4:.1f} cm²)")
-    print(f"  E_I ∩ ROI_lower cells: {n_IL}  ({n_IL * GRID_RES**2 * 1e4:.1f} cm²)")
+        # ---- Danger zone ----
+        grid_I = make_grid()
+        grid_I.grid = grid_L.grid & grid_R.grid
+        n_I = np.count_nonzero(grid_I.grid)
+        print(f"  E_I cells: {n_I}  ({n_I * GRID_RES**2 * 1e4:.1f} cm²)")
+
+        # ---- Intersect with ROI upper / lower ----
+        mask_upper = rect_mask(grid_I, ROI_UPPER)
+        mask_lower = rect_mask(grid_I, ROI_LOWER)
+        grid_I_upper = grid_I.grid & mask_upper
+        grid_I_lower = grid_I.grid & mask_lower
+        n_IU = np.count_nonzero(grid_I_upper)
+        n_IL = np.count_nonzero(grid_I_lower)
+        print(f"\n  E_I ∩ ROI_upper cells: {n_IU}  ({n_IU * GRID_RES**2 * 1e4:.1f} cm²)")
+        print(f"  E_I ∩ ROI_lower cells: {n_IL}  ({n_IL * GRID_RES**2 * 1e4:.1f} cm²)")
+
+        # ---- Save Data ----
+        print(f"\nSaving danger zone data → {data_path}")
+        np.savez_compressed(
+            data_path,
+            grid_L=grid_L.grid,
+            grid_R=grid_R.grid,
+            grid_I=grid_I.grid,
+            grid_I_upper=grid_I_upper,
+            grid_I_lower=grid_I_lower,
+            extent=np.array([GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX]),
+            res=np.array([GRID_RES])
+        )
 
     # ---- Visualise ----
     fig_path = os.path.join(RESULT_DIR, "danger_zone_envelopes.png")
     print(f"\nGenerating visualisation → {fig_path}")
     plot_envelopes(grid_L, grid_R, grid_I,
                    grid_I_upper, grid_I_lower,
-                   chain_L.T_base, chain_R.T_base,
+                   chain_L, chain_R,
                    save_path=fig_path)
 
     print("\nDone ✓")
