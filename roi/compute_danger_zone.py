@@ -641,17 +641,12 @@ def main():
     # ---- Home configuration (same seed as build_roi_table) ----
     # 7-DOF home configuration (same as q_seed in build_roi_table.py):
     # [j1_prismatic, j2_revolute, j3_prismatic, j4_revolute, j5_revolute, j6_revolute, j7_revolute]
-    q_home = np.array([0.10, 0.0, 0.23, -1.57, -2.40, -1.93, 0.0])
+    q_home = np.array([0, -2, 0.23, -2.5, -1, -3, 0.0])
 
     # ---- Visualisation poses ----
-    # With j2=0 both arms extend toward the centre and visually overlap.
-    # Setting j2=-1.2 makes the left arm extend toward +y and the right
-    # arm (whose base is yawed 180°) extend toward -y, giving a clear
-    # visual separation while preserving all link lengths.
+    # 在果篮位置的初始姿态（直接使用预定义的 q_home）
     q_vis_L = q_home.copy()
-    q_vis_L[1] = -1.2
     q_vis_R = q_home.copy()
-    q_vis_R[1] = -1.2
 
     # ---- Visualise ----
     fig_path = os.path.join(RESULT_DIR, "danger_zone_envelopes.png")

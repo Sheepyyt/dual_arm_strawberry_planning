@@ -73,7 +73,7 @@ CONFIG = {
     # ---------- nominal seed ----------
     # 7 joints: [prismatic, revolute, prismatic, revolute, revolute, revolute, revolute]
     "q_seed": np.array(
-        [0.10, 0.0, 0.23, -1.57, -2.40, -1.93, 0.0],
+        [0, -2, 0.23, -2.5, -1, -3, 0.0],
         dtype=float
     ),
 
