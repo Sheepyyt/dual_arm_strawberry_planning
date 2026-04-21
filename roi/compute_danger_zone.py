@@ -641,7 +641,11 @@ def main():
     # ---- Home configuration (same seed as build_roi_table) ----
     # 7-DOF home configuration (same as q_seed in build_roi_table.py):
     # [j1_prismatic, j2_revolute, j3_prismatic, j4_revolute, j5_revolute, j6_revolute, j7_revolute]
-    q_home = np.array([0, -2, 0.23, -2.5, -1, -3, 0.0])
+    # URDF 关节约束限制: 
+    # J1(prismatic): [0.001, 0.235] | J2(revolute): [-6.28, 6.28] | J3(prismatic): [0.001, 0.45] 
+    # J4(revolute): [-3.25, -0.001] | J5(revolute): [-3.6, -0.001]  | J6(revolute): [0.0, 4.0] 
+    # J7(revolute): [-3.14, 3.14]
+    q_home = np.array([0.001, -2, 0.23, -2.5, -1, 3.0, 0.0])
 
     # ---- Visualisation poses ----
     # 在果篮位置的初始姿态（直接使用预定义的 q_home）

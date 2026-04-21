@@ -72,8 +72,12 @@ CONFIG = {
 
     # ---------- nominal seed ----------
     # 7 joints: [prismatic, revolute, prismatic, revolute, revolute, revolute, revolute]
+    # URDF 关节约束限制: 
+    # J1(prismatic): [0.001, 0.235] | J2(revolute): [-6.28, 6.28] | J3(prismatic): [0.001, 0.45] 
+    # J4(revolute): [-3.25, -0.001] | J5(revolute): [-3.6, -0.001]  | J6(revolute): [0.0, 4.0] 
+    # J7(revolute): [-3.14, 3.14]
     "q_seed": np.array(
-        [0, -2, 0.23, -2.5, -1, -3, 0.0],
+        [0.001, -2, 0.23, -2.5, -1, 3.0, 0.0],
         dtype=float
     ),
 
