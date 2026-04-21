@@ -410,14 +410,14 @@ def _add_vehicle_and_bases(ax, T_left, T_right):
 def _add_roi_rects(ax):
     """Draw the ROI upper / lower rectangles."""
     for roi, clr, lbl in [
-        (ROI_UPPER, "blue", "ROI upper"),
-        (ROI_LOWER, "green", "ROI lower"),
+        (ROI_UPPER, "dimgray", "ROI upper"),
+        (ROI_LOWER, "dimgray", "ROI lower"),
     ]:
         r = patches.Rectangle(
             (roi["x_min"], roi["y_min"]),
             roi["x_max"] - roi["x_min"],
             roi["y_max"] - roi["y_min"],
-            linewidth=2, edgecolor=clr, facecolor="none",
+            linewidth=1, edgecolor=clr, facecolor="none",
             linestyle="-", label=lbl, zorder=4,
         )
         ax.add_patch(r)

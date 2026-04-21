@@ -1,28 +1,13 @@
 #!/usr/bin/env python3
 """
-build_roi_table_selected_points_cover_first.py
+build_roi_table_selected_points_cover_first_v2.py
 
-覆盖优先版本：
-1) 固定点集：
-   y = ±0.3, ±0.4, ±0.5
-   x = 0, ±0.1, ±0.2, ±0.3, ±0.4
-   z = 0.56
-
-2) 搜索策略：
-   - 先广覆盖 yaw（均匀覆盖整圈），避免只在局部附近打转
-   - 先广覆盖 seed（home / 手工极端 seed / 关节上下限全局随机 seed）
-   - 仅在已经找到成功 yaw 后，才对其附近做局部加密（可选）
-
-3) safe 优先规则：
-   - 若点本身落在对应 danger mask 中，则跳过 safe 搜索，直接走 fallback
-   - 若点本身不在对应 danger mask 中，则优先保留“终点全身姿态通过 safe 检查”的 IK 解
-   - 若一个 safe 终点也找不到，则再保留 fallback IK 解
-
-4) 输出：
-   - roi/results/roi_table_selected_points.pkl
-   - roi/results/selected_points_reachability.png
-
-不再生成 dual_arm_cost_selected_points.pkl
+在 cover_first 版本基础上新增：
+1) 若 roi/results/roi_table_selected_points.pkl 已存在，则默认不重复求解，直接读取并重画图
+2) 图中标注每个点左右臂的 safe/fallback 解数量：
+   - 左臂: L s/f
+   - 右臂: R s/f
+3) 保留 --force-regenerate，可强制重新求解
 """
 import os
 import sys
@@ -46,7 +31,6 @@ from build_roi_table import (
     load_base_transforms_from_urdf,
     pose_xyz_yaw_to_T,
 )
-
 from compute_danger_zone import URDFArmChain
 
 try:
@@ -58,24 +42,23 @@ except Exception as e:
 
 def build_parser():
     p = argparse.ArgumentParser()
-    p.add_argument("--timeout", type=float, default=0.15)
+    p.add_argument("--timeout", type=float, default=0.035)
     p.add_argument("--dist-eps", type=float, default=0.001)
     p.add_argument("--yaw-min", type=float, default=-math.pi)
-    p.add_argument("--yaw-max", type=float, default= math.pi)
-    p.add_argument("--global-yaw-count", type=int, default=25, help="第一阶段全局均匀覆盖的 yaw 数")
-    p.add_argument("--local-yaw-delta", type=float, default=0.12, help="第二阶段局部细化的 yaw 偏移")
-    p.add_argument("--enable-local-refine", action="store_true", help="对成功 yaw 附近再做局部细化")
-    p.add_argument("--n-global-random-seeds", type=int, default=48, help="从 joint limits 全局均匀随机采样的 seed 数")
-    p.add_argument("--n-home-perturb-seeds", type=int, default=24, help="围绕 q_home 的大扰动 seed 数")
-    p.add_argument("--max-attempts-per-yaw", type=int, default=64)
-    p.add_argument("--max-solutions-per-yaw", type=int, default=12)
-    p.add_argument("--max-safe-solutions", type=int, default=24)
+    p.add_argument("--yaw-max", type=float, default=math.pi)
+    p.add_argument("--global-yaw-count", type=int, default=17)
+    p.add_argument("--local-yaw-delta", type=float, default=0.12)
+    p.add_argument("--enable-local-refine", action="store_true")
+    p.add_argument("--n-global-random-seeds", type=int, default=8)
+    p.add_argument("--n-home-perturb-seeds", type=int, default=4)
+    p.add_argument("--max-attempts-per-yaw", type=int, default=12)
+    p.add_argument("--max-solutions-per-yaw", type=int, default=3)
+    p.add_argument("--max-safe-solutions", type=int, default=8)
     p.add_argument("--z", type=float, default=0.56)
-
     p.add_argument("--x-values", type=str, default="-0.4,-0.3,-0.2,-0.1,0.0,0.1,0.2,0.3,0.4")
     p.add_argument("--y-values", type=str, default="-0.5,-0.4,-0.3,0.3,0.4,0.5")
-
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--force-regenerate", action="store_true")
     p.add_argument("--verbose", action="store_true")
     return p
 
@@ -213,8 +196,7 @@ def clip_to_limits(q, joint_limits):
 
 
 def make_seed_bank(q_home, joint_limits, rng, args):
-    bank = []
-    bank.append(np.asarray(q_home, dtype=float))
+    bank = [np.asarray(q_home, dtype=float)]
     manuals = [
         np.array([0.0, -2.4, 0.23, -2.8, -1.2, -3.0,  0.0]),
         np.array([0.0, -1.2, 0.23, -1.4, -2.4, -2.0,  1.8]),
@@ -226,8 +208,7 @@ def make_seed_bank(q_home, joint_limits, rng, args):
     for q in manuals:
         bank.append(clip_to_limits(q, joint_limits))
     for _ in range(args.n_home_perturb_seeds):
-        q = perturb_seed_large(q_home, rng)
-        bank.append(clip_to_limits(q, joint_limits))
+        bank.append(clip_to_limits(perturb_seed_large(q_home, rng), joint_limits))
     for _ in range(args.n_global_random_seeds):
         bank.append(sample_global_seed(joint_limits, rng))
     out = []
@@ -239,7 +220,7 @@ def make_seed_bank(q_home, joint_limits, rng, args):
 
 def try_yaw_with_seed_bank(solver, T_target, seed_bank, cfg, args):
     sols = []
-    n_attempt = min(args.max_attempts-per-yaw if False else args.max_attempts_per_yaw, len(seed_bank))
+    n_attempt = min(args.max_attempts_per_yaw, len(seed_bank))
     for i in range(n_attempt):
         qinit = np.asarray(seed_bank[i], dtype=float)
         q = solver.ik(
@@ -265,15 +246,10 @@ def solve_for_arm_point_cover_first(solver, chain, T_vehicle_from_arm, p_vehicle
     point_in_danger, safe_mask = point_in_corresponding_danger_mask(p_vehicle, masks)
 
     entry = {
-        "angles": [],
-        "solutions": {},
-        "safe_goal_solutions": [],
-        "fallback_goal_solutions": [],
-        "goal_solutions": [],
-        "goal_solution_meta": [],
-        "best_yaw": None,
-        "best_solution": None,
-        "best_time": None,
+        "angles": [], "solutions": {},
+        "safe_goal_solutions": [], "fallback_goal_solutions": [],
+        "goal_solutions": [], "goal_solution_meta": [],
+        "best_yaw": None, "best_solution": None, "best_time": None,
         "local_xyz": [float(x_l), float(y_l), float(z_l)],
         "point_in_danger": bool(point_in_danger),
         "preferred_mode": None,
@@ -284,18 +260,12 @@ def solve_for_arm_point_cover_first(solver, chain, T_vehicle_from_arm, p_vehicle
 
     seed_bank = make_seed_bank(q_home, joint_limits, rng, args)
     global_yaws = build_global_yaw_list(args)
-
-    safe_bucket = []
-    fallback_bucket = []
-    success_yaws = []
+    safe_bucket, fallback_bucket, success_yaws = [], [], []
 
     def process_yaws(yaw_values, stage_name):
         nonlocal safe_bucket, fallback_bucket, success_yaws
         for yaw in yaw_values:
-            T_target = pose_xyz_yaw_to_T(
-                float(x_l), float(y_l), float(z_l),
-                float(yaw), cfg["ee_target_roll"], cfg["ee_target_pitch"]
-            )
+            T_target = pose_xyz_yaw_to_T(float(x_l), float(y_l), float(z_l), float(yaw), cfg["ee_target_roll"], cfg["ee_target_pitch"])
             sols = try_yaw_with_seed_bank(solver, T_target, seed_bank, cfg, args)
             if args.verbose:
                 print(f"      [{stage_name}] yaw={yaw:.3f} -> {len(sols)} sols", flush=True)
@@ -323,54 +293,56 @@ def solve_for_arm_point_cover_first(solver, chain, T_vehicle_from_arm, p_vehicle
 
     safe_bucket = dedup_meta(safe_bucket)
     fallback_bucket = dedup_meta(fallback_bucket)
-
     entry["safe_goal_solutions"] = [b["q"] for b in safe_bucket[:args.max_safe_solutions]]
     entry["fallback_goal_solutions"] = [b["q"] for b in fallback_bucket]
     entry["n_safe_goal_solutions"] = len(entry["safe_goal_solutions"])
     entry["n_fallback_goal_solutions"] = len(entry["fallback_goal_solutions"])
 
-    if len(entry["safe_goal_solutions"]) > 0:
+    if entry["n_safe_goal_solutions"] > 0:
         final_bucket = safe_bucket[:args.max_safe_solutions]
         entry["preferred_mode"] = "safe"
-    elif len(entry["fallback_goal_solutions"]) > 0:
+    elif entry["n_fallback_goal_solutions"] > 0:
         final_bucket = fallback_bucket
         entry["preferred_mode"] = "fallback"
     else:
         final_bucket = []
         entry["preferred_mode"] = "none"
 
-    by_yaw = {}
-    best_time = None
-    best_q = None
-    best_yaw = None
-    final_goals = []
-
+    by_yaw, best_time, best_q, best_yaw, final_goals = {}, None, None, None, []
     for item in final_bucket:
         yaw = float(item["yaw"])
         q = np.asarray(item["q"], dtype=float)
-        yk = angle_key(yaw)
-        by_yaw.setdefault(yk, [])
-        by_yaw[yk].append(q.tolist())
+        by_yaw.setdefault(angle_key(yaw), []).append(q.tolist())
         final_goals.append(q.tolist())
         t = motion_time(q_home, q, joint_speed=cfg["joint_speed"])
         if best_time is None or t < best_time:
-            best_time = float(t)
-            best_q = q.copy()
-            best_yaw = yaw
+            best_time, best_q, best_yaw = float(t), q.copy(), yaw
 
     entry["solutions"] = by_yaw
     entry["angles"] = sorted(unique_list([float(item["yaw"]) for item in final_bucket]))
     entry["goal_solution_meta"] = [{"yaw": float(item["yaw"]), "q": item["q"]} for item in final_bucket]
     entry["goal_solutions"] = [q.tolist() for q in dedup_solutions(final_goals)] if final_goals else []
     entry["n_goal_solutions"] = len(entry["goal_solutions"])
-
     if best_q is not None:
         entry["best_solution"] = best_q.tolist()
         entry["best_yaw"] = best_yaw
         entry["best_time"] = best_time
         entry["classification"] = "reachable"
-
     return entry
+
+
+def annotate_counts(ax, data, which="combined"):
+    for item in data.values():
+        x, y, _ = item["vehicle_xyz"]
+        ls = int(item["left"].get("n_safe_goal_solutions", 0))
+        lf = int(item["left"].get("n_fallback_goal_solutions", 0))
+        rs = int(item["right"].get("n_safe_goal_solutions", 0))
+        rf = int(item["right"].get("n_fallback_goal_solutions", 0))
+        if which in ("left", "combined"):
+            ax.text(x + 0.008, y + 0.012, f"L {ls}/{lf}", fontsize=6, color="#486A9A")
+        if which in ("right", "combined"):
+            dy = -0.012 if which == "combined" else 0.012
+            ax.text(x + 0.008, y + dy, f"R {rs}/{rf}", fontsize=6, color="#4E8B61")
 
 
 def plot_reachability(roi_payload, out_png, T_left, T_right):
@@ -379,7 +351,6 @@ def plot_reachability(roi_payload, out_png, T_left, T_right):
     left_groups = {"unreachable": [], "reachable": []}
     right_groups = {"unreachable": [], "reachable": []}
     summary_groups = {"both_unreachable": [], "left_only": [], "right_only": [], "both_reachable": []}
-
     for _, item in data.items():
         x, y, z = item["vehicle_xyz"]
         if not np.isclose(z, target_z, atol=1e-6):
@@ -388,37 +359,31 @@ def plot_reachability(roi_payload, out_png, T_left, T_right):
         cls_right = item["right"]["classification"]
         left_groups[cls_left].append((x, y))
         right_groups[cls_right].append((x, y))
-        left_ok = cls_left == "reachable"
-        right_ok = cls_right == "reachable"
-        if left_ok and right_ok:
+        l = cls_left == "reachable"
+        r = cls_right == "reachable"
+        if l and r:
             summary_groups["both_reachable"].append((x, y))
-        elif left_ok and not right_ok:
+        elif l and not r:
             summary_groups["left_only"].append((x, y))
-        elif (not left_ok) and right_ok:
+        elif (not l) and r:
             summary_groups["right_only"].append((x, y))
         else:
             summary_groups["both_unreachable"].append((x, y))
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig, axes = plt.subplots(1, 3, figsize=(20, 7))
 
     def setup_ax(ax, title):
-        veh = patches.Rectangle((-0.50, -0.25), 1.0, 0.50, linewidth=2, edgecolor="gray",
-                                facecolor="lightgray", alpha=0.25, linestyle="--")
+        veh = patches.Rectangle((-0.50, -0.25), 1.0, 0.50, linewidth=2, edgecolor="gray", facecolor="lightgray", alpha=0.25, linestyle="--")
         ax.add_patch(veh)
         ax.scatter(T_left[0, 3], T_left[1, 3], c="#819CC4", marker="*", s=160, zorder=5, label="Left arm base")
         ax.scatter(T_right[0, 3], T_right[1, 3], c="#8CC19A", marker="*", s=160, zorder=5, label="Right arm base")
-        for roi, clr in [
-            ({"x_min": -0.5, "x_max": 0.5, "y_min": 0.25, "y_max": 0.65}, "blue"),
-            ({"x_min": -0.5, "x_max": 0.5, "y_min": -0.65, "y_max": -0.25}, "green"),
-        ]:
-            ax.add_patch(patches.Rectangle((roi["x_min"], roi["y_min"]),
-                                           roi["x_max"] - roi["x_min"], roi["y_max"] - roi["y_min"],
-                                           linewidth=1.5, edgecolor=clr, facecolor="none"))
+        for roi, clr in [({"x_min": -0.5, "x_max": 0.5, "y_min": 0.25, "y_max": 0.65}, "dimgray"), ({"x_min": -0.5, "x_max": 0.5, "y_min": -0.65, "y_max": -0.25}, "dimgray")]:
+            ax.add_patch(patches.Rectangle((roi["x_min"], roi["y_min"]), roi["x_max"] - roi["x_min"], roi["y_max"] - roi["y_min"], linewidth=0.8, edgecolor=clr, facecolor="none"))
         ax.set_title(title)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
-        ax.set_xlim(-0.48, 0.48)
-        ax.set_ylim(-0.60, 0.60)
+        ax.set_xlim(-0.52, 0.52)
+        ax.set_ylim(-0.64, 0.64)
         ax.set_aspect("equal")
         ax.grid(True, alpha=0.3)
 
@@ -426,14 +391,16 @@ def plot_reachability(roi_payload, out_png, T_left, T_right):
     for cls, pts in left_groups.items():
         if pts:
             pts = np.asarray(pts)
-            axes[0].scatter(pts[:, 0], pts[:, 1], s=30, c={"unreachable":"#BB5F76","reachable":"#AFC4E4"}[cls], label=cls)
+            axes[0].scatter(pts[:, 0], pts[:, 1], s=34, c={"unreachable":"#BB5F76","reachable":"#AFC4E4"}[cls], label=cls)
+    annotate_counts(axes[0], data, which="left")
     axes[0].legend(loc="center left", fontsize=8)
 
     setup_ax(axes[1], f"Right-arm IK coverage @ z={target_z:.2f}")
     for cls, pts in right_groups.items():
         if pts:
             pts = np.asarray(pts)
-            axes[1].scatter(pts[:, 0], pts[:, 1], s=30, c={"unreachable":"#BB5F76","reachable":"#BEE4C8"}[cls], label=cls)
+            axes[1].scatter(pts[:, 0], pts[:, 1], s=34, c={"unreachable":"#BB5F76","reachable":"#BEE4C8"}[cls], label=cls)
+    annotate_counts(axes[1], data, which="right")
     axes[1].legend(loc="center left", fontsize=8)
 
     setup_ax(axes[2], f"Combined reachability @ z={target_z:.2f}")
@@ -441,18 +408,29 @@ def plot_reachability(roi_payload, out_png, T_left, T_right):
     for cls, pts in summary_groups.items():
         if pts:
             pts = np.asarray(pts)
-            axes[2].scatter(pts[:, 0], pts[:, 1], s=30, c=cmap[cls], label=cls)
+            axes[2].scatter(pts[:, 0], pts[:, 1], s=34, c=cmap[cls], label=cls)
+    annotate_counts(axes[2], data, which="combined")
     axes[2].legend(loc="center left", fontsize=8)
 
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
-    fig.savefig(out_png, dpi=250, bbox_inches="tight")
+    fig.savefig(out_png, dpi=260, bbox_inches="tight")
     print(f"Saved figure to {out_png}", flush=True)
+
+
+def summarize(payload):
+    left_reach = right_reach = dual_reach = 0
+    for item in payload["data"].values():
+        l = item["left"]["classification"] == "reachable"
+        r = item["right"]["classification"] == "reachable"
+        left_reach += int(l)
+        right_reach += int(r)
+        dual_reach += int(l and r)
+    return {"left_reachable": left_reach, "right_reachable": right_reach, "dual_reachable": dual_reach}
 
 
 def main():
     args = build_parser().parse_args()
-    rng = np.random.default_rng(args.seed)
     cfg = dict(BASE_CONFIG)
     cfg["timeout"] = args.timeout
     urdf_path = cfg["urdf_path"]
@@ -461,18 +439,28 @@ def main():
     roi_table_file = os.path.join(out_dir, "roi_table_selected_points.pkl")
     fig_file = os.path.join(out_dir, "selected_points_reachability.png")
     danger_npz = os.path.join(out_dir, "danger_zone_data.npz")
+    T_left, T_right = load_base_transforms_from_urdf(urdf_path, cfg["left_base_joint"], cfg["right_base_joint"])
+
+    if os.path.exists(roi_table_file) and not args.force_regenerate:
+        with open(roi_table_file, "rb") as f:
+            payload = pickle.load(f)
+        print(f"[info] existing ROI table found, skip solving: {roi_table_file}", flush=True)
+        print(summarize(payload), flush=True)
+        plot_reachability(payload, fig_file, T_left, T_right)
+        return
+
     if not os.path.exists(danger_npz):
         raise FileNotFoundError(f"danger zone file not found: {danger_npz}")
+
+    rng = np.random.default_rng(args.seed)
     masks = load_masks(danger_npz)
-    T_left, T_right = load_base_transforms_from_urdf(urdf_path, cfg["left_base_joint"], cfg["right_base_joint"])
     solver = TracIKSolver(urdf_file=urdf_path, base_link=cfg["ik_base_link"], tip_link=cfg["ik_tip_link"], timeout=args.timeout)
     left_chain = URDFArmChain(urdf_path, cfg["left_base_joint"], "left_arm")
     right_chain = URDFArmChain(urdf_path, cfg["right_base_joint"], "right_arm")
     pts, x_values, y_values = selected_points(args)
     print(f"[info] total selected points = {len(pts)}", flush=True)
 
-    payload = {"meta": {"source": "build_roi_table_selected_points_cover_first.py", "z": float(args.z), "x_values": x_values, "y_values": y_values, "args": vars(args)}, "data": {}}
-
+    payload = {"meta": {"source": os.path.basename(__file__), "z": float(args.z), "x_values": x_values, "y_values": y_values, "args": vars(args)}, "data": {}}
     for idx, p in enumerate(pts, start=1):
         key = create_key(*p)
         print(f"[point {idx}/{len(pts)}] {key}", flush=True)
@@ -486,14 +474,7 @@ def main():
     with open(roi_table_file, "wb") as f:
         pickle.dump(payload, f, protocol=4)
     print(f"Saved ROI table to {roi_table_file}", flush=True)
-
-    left_reach = right_reach = dual_reach = 0
-    for item in payload["data"].values():
-        l = item["left"]["classification"] == "reachable"
-        r = item["right"]["classification"] == "reachable"
-        left_reach += int(l); right_reach += int(r); dual_reach += int(l and r)
-    print({"left_reachable": left_reach, "right_reachable": right_reach, "dual_reachable": dual_reach}, flush=True)
-
+    print(summarize(payload), flush=True)
     plot_reachability(payload, fig_file, T_left, T_right)
 
 
