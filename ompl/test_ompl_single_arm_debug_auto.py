@@ -2,10 +2,12 @@
 """
 OMPL 单臂测试脚本（建议放到项目根目录的 ompl/ 文件夹内使用）
 - 默认从 ../roi/results/ 读取 roi_table_selected_points.pkl 和 danger_zone_data.npz
-- 优先使用 safe 终点解；若点本身在危险区，则直接跳过 safe 搜索转入 fallback
-- mode=auto 时按上述规则自动选择
-- mode=safe 时仅使用 safe 解
-- mode=free 时优先使用 fallback 解，若没有则退回全部 goal_solutions
+- mode=auto: 有 safe 解则优先 safe；若点本身在危险区，则直接使用 fallback/free
+- mode=safe: 只使用 safe 解
+- mode=free: 只使用 fallback 解；若没有则退回全部 goal_solutions
+- 可视化新增：
+    1) 所有 candidate goal 的终点姿态 -> 淡灰色骨架
+    2) best path 最终落到的终点姿态 -> 红色高亮骨架
 """
 import os
 import sys
@@ -193,7 +195,6 @@ def select_goals(arm_data, mode, point_in_danger):
     if mode == "free":
         return (fallback_goals or all_goals), "free"
 
-    # auto
     if point_in_danger:
         return (fallback_goals or all_goals), "free"
     if safe_goals:
@@ -209,25 +210,57 @@ def count_valid_goals(goals, chain, mask_obj):
     return valid
 
 
-def plot_result(out_png, key, arm, used_mode, point_xyz, danger, chain, q_path, T_left, T_right):
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+def nearest_goal_index(best_goal_q, candidate_goals):
+    if best_goal_q is None or not candidate_goals:
+        return None
+    d = [float(np.linalg.norm(np.asarray(g) - np.asarray(best_goal_q))) for g in candidate_goals]
+    return int(np.argmin(d))
+
+
+def plot_result(out_png, key, arm, used_mode, point_xyz, masks_dict, chain, q_path, T_left, T_right, candidate_goals):
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+
     ax = axes[0]
     veh = patches.Rectangle((-0.50, -0.25), 1.0, 0.50, linewidth=2, edgecolor="gray", facecolor="lightgray", alpha=0.25, linestyle="--")
     ax.add_patch(veh)
-    ax.scatter(T_left[0, 3], T_left[1, 3], c="#819CC4", marker="*", s=140)
-    ax.scatter(T_right[0, 3], T_right[1, 3], c="#8CC19A", marker="*", s=140)
+    ax.scatter(T_left[0, 3], T_left[1, 3], c="#819CC4", marker="*", s=140, label="Left arm base")
+    ax.scatter(T_right[0, 3], T_right[1, 3], c="#8CC19A", marker="*", s=140, label="Right arm base")
     ax.scatter([point_xyz[0]], [point_xyz[1]], c="red", marker="x", s=80, label="target")
-    if danger is not None:
-        ix, iy = np.where(danger.grid)
-        xs = danger.x_min + (ix + 0.5) * danger.res
-        ys = danger.y_min + (iy + 0.5) * danger.res
-        ax.scatter(xs, ys, s=2, c="orange", alpha=0.2, label="danger mask")
-    if q_path is not None:
+
+    if masks_dict is not None:
+        du = masks_dict["upper"]
+        ix, iy = np.where(du.grid)
+        xs = du.x_min + (ix + 0.5) * du.res
+        ys = du.y_min + (iy + 0.5) * du.res
+        ax.scatter(xs, ys, s=2, c="#e8a838", alpha=0.18, label="danger mask (upper)")
+
+        dl = masks_dict["lower"]
+        ix, iy = np.where(dl.grid)
+        xs = dl.x_min + (ix + 0.5) * dl.res
+        ys = dl.y_min + (iy + 0.5) * dl.res
+        ax.scatter(xs, ys, s=2, c="#9b59b6", alpha=0.18, label="danger mask (lower)")
+
+    # 2) sampled robot postures along the best path (time progression)
+    best_goal_q = None
+    if q_path is not None and len(q_path) > 0:
+        best_goal_q = q_path[-1]
         idxs = np.linspace(0, len(q_path) - 1, min(8, len(q_path))).astype(int)
-        for idx in idxs:
+        cmap = plt.cm.viridis(np.linspace(0.12, 0.95, len(idxs)))
+        for k, idx in enumerate(idxs):
             pts = chain.fk_all_frames(q_path[idx])
-            ax.plot(pts[:, 0], pts[:, 1], "-", lw=1.0, alpha=0.7)
-            ax.plot(pts[-1, 0], pts[-1, 1], "o", ms=3)
+            label = "path snapshots" if k == 0 else None
+            ax.plot(pts[:, 0], pts[:, 1], "-", lw=1.6, alpha=0.9, color=cmap[k], label=label, zorder=2)
+            ax.plot(pts[-1, 0], pts[-1, 1], "o", ms=3.5, color=cmap[k], zorder=2)
+
+    # 3) highlight final chosen goal pose
+    if best_goal_q is not None:
+        pts = chain.fk_all_frames(best_goal_q)
+        ax.plot(pts[:, 0], pts[:, 1], "-", lw=2.8, alpha=0.95, color="crimson", label="best final pose", zorder=3)
+        ax.plot(pts[-1, 0], pts[-1, 1], "o", ms=5, color="crimson", zorder=3)
+        goal_idx = nearest_goal_index(best_goal_q, candidate_goals)
+        if goal_idx is not None:
+            ax.text(pts[-1, 0] + 0.01, pts[-1, 1] + 0.01, f"goal#{goal_idx}", fontsize=8, color="crimson")
+
     ax.set_title(f"{arm} arm {used_mode} path overlay")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
@@ -237,6 +270,7 @@ def plot_result(out_png, key, arm, used_mode, point_xyz, danger, chain, q_path, 
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right", fontsize=8)
 
+    # joint trajectory plot
     ax2 = axes[1]
     if q_path is not None:
         for j in range(q_path.shape[1]):
@@ -258,6 +292,7 @@ def main():
     cfg = dict(BASE_CONFIG)
     with open(args.roi_pkl, "rb") as f:
         roi = pickle.load(f)
+
     item = roi["data"][args.key]
     point_xyz = item["vehicle_xyz"]
     half = item.get("half", "upper" if point_xyz[1] >= 0.25 else "lower")
@@ -266,7 +301,8 @@ def main():
     arm_data = item[arm_key]
 
     masks = load_masks(args.danger_npz)
-    active_mask = masks[half] if args.mode in ("safe", "auto") else None
+    vis_mask = masks[half]
+    active_mask = vis_mask if args.mode in ("safe", "auto") else None
     used_goals, used_mode = select_goals(arm_data, args.mode, point_in_danger)
     if not used_goals:
         raise RuntimeError(f"No candidate goals for {args.arm} @ {args.key} under mode={args.mode}")
@@ -277,7 +313,6 @@ def main():
     q_home = np.asarray(cfg["q_seed"], dtype=float)
     space = build_space(chain.joint_limits)
 
-    # For safe/auto-safe, prune invalid terminal states before planning
     planner_mask = active_mask if used_mode == "safe" else None
     if used_mode == "safe":
         valid_goals = count_valid_goals(used_goals, chain, planner_mask)
@@ -289,19 +324,20 @@ def main():
     if not used_goals:
         print("[result] no valid goal states before planning", flush=True)
         out_png = os.path.join(OMPL_RESULTS_DIR, f"ompl_test_{args.arm}_{args.key.replace('.', 'p')}_{used_mode}.png")
-        plot_result(out_png, args.key, args.arm, used_mode, point_xyz, planner_mask, chain, None, T_left, T_right)
+        plot_result(out_png, args.key, args.arm, used_mode, point_xyz, masks, chain, None, T_left, T_right, [])
         return
 
     best_path, best_cost = None, None
     for trial in range(args.num_trials):
-        q_path = plan_one_trial(space, chain.joint_limits, q_home, used_goals, chain, planner_mask, args.solve_time, args.resolution, args.planner, args.interpolate_count)
+        q_path = plan_one_trial(space, chain.joint_limits, q_home, used_goals, chain, planner_mask,
+                                args.solve_time, args.resolution, args.planner, args.interpolate_count)
         c = path_time(q_path)
         print(f"[trial {trial+1}/{args.num_trials}] success={q_path is not None} cost={c}", flush=True)
         if q_path is not None and (best_cost is None or c < best_cost):
             best_cost, best_path = c, q_path
 
     out_png = os.path.join(OMPL_RESULTS_DIR, f"ompl_test_{args.arm}_{args.key.replace('.', 'p')}_{used_mode}.png")
-    plot_result(out_png, args.key, args.arm, used_mode, point_xyz, planner_mask, chain, best_path, T_left, T_right)
+    plot_result(out_png, args.key, args.arm, used_mode, point_xyz, masks, chain, best_path, T_left, T_right, used_goals)
     if best_path is None:
         print("[result] no path found", flush=True)
     else:
