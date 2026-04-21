@@ -345,7 +345,7 @@ def annotate_counts(ax, data, which="combined"):
             ax.text(x + 0.008, y + dy, f"R {rs}/{rf}", fontsize=6, color="#4E8B61")
 
 
-def plot_reachability(roi_payload, out_png, T_left, T_right):
+def plot_reachability(roi_payload, out_png, T_left, T_right, masks=None):
     target_z = float(roi_payload["meta"]["z"])
     data = roi_payload["data"]
     left_groups = {"unreachable": [], "reachable": []}
@@ -377,6 +377,26 @@ def plot_reachability(roi_payload, out_png, T_left, T_right):
         ax.add_patch(veh)
         ax.scatter(T_left[0, 3], T_left[1, 3], c="#819CC4", marker="*", s=160, zorder=5, label="Left arm base")
         ax.scatter(T_right[0, 3], T_right[1, 3], c="#8CC19A", marker="*", s=160, zorder=5, label="Right arm base")
+        
+        if masks is not None:
+            extent = masks["extent"]
+            res = masks["res"]
+            x_min, _, y_min, _ = extent
+
+            # Upper danger mask
+            du_grid = masks["grid_I_upper"]
+            ix, iy = np.where(du_grid)
+            xs = x_min + (ix + 0.5) * res
+            ys = y_min + (iy + 0.5) * res
+            ax.scatter(xs, ys, s=2, c="#e8a838", alpha=0.18, zorder=1, label="_nolegend_")
+
+            # Lower danger mask
+            dl_grid = masks["grid_I_lower"]
+            ix, iy = np.where(dl_grid)
+            xs = x_min + (ix + 0.5) * res
+            ys = y_min + (iy + 0.5) * res
+            ax.scatter(xs, ys, s=2, c="#9b59b6", alpha=0.18, zorder=1, label="_nolegend_")
+
         for roi, clr in [({"x_min": -0.5, "x_max": 0.5, "y_min": 0.25, "y_max": 0.65}, "dimgray"), ({"x_min": -0.5, "x_max": 0.5, "y_min": -0.65, "y_max": -0.25}, "dimgray")]:
             ax.add_patch(patches.Rectangle((roi["x_min"], roi["y_min"]), roi["x_max"] - roi["x_min"], roi["y_max"] - roi["y_min"], linewidth=0.8, edgecolor=clr, facecolor="none"))
         ax.set_title(title)
@@ -391,7 +411,7 @@ def plot_reachability(roi_payload, out_png, T_left, T_right):
     for cls, pts in left_groups.items():
         if pts:
             pts = np.asarray(pts)
-            axes[0].scatter(pts[:, 0], pts[:, 1], s=34, c={"unreachable":"#BB5F76","reachable":"#AFC4E4"}[cls], label=cls)
+            axes[0].scatter(pts[:, 0], pts[:, 1], s=34, c={"unreachable":"#BB5F76","reachable":"#AFC4E4"}[cls], label=cls, zorder=3)
     annotate_counts(axes[0], data, which="left")
     axes[0].legend(loc="center left", fontsize=8)
 
@@ -399,7 +419,7 @@ def plot_reachability(roi_payload, out_png, T_left, T_right):
     for cls, pts in right_groups.items():
         if pts:
             pts = np.asarray(pts)
-            axes[1].scatter(pts[:, 0], pts[:, 1], s=34, c={"unreachable":"#BB5F76","reachable":"#BEE4C8"}[cls], label=cls)
+            axes[1].scatter(pts[:, 0], pts[:, 1], s=34, c={"unreachable":"#BB5F76","reachable":"#BEE4C8"}[cls], label=cls, zorder=3)
     annotate_counts(axes[1], data, which="right")
     axes[1].legend(loc="center left", fontsize=8)
 
@@ -408,7 +428,7 @@ def plot_reachability(roi_payload, out_png, T_left, T_right):
     for cls, pts in summary_groups.items():
         if pts:
             pts = np.asarray(pts)
-            axes[2].scatter(pts[:, 0], pts[:, 1], s=34, c=cmap[cls], label=cls)
+            axes[2].scatter(pts[:, 0], pts[:, 1], s=34, c=cmap[cls], label=cls, zorder=3)
     annotate_counts(axes[2], data, which="combined")
     axes[2].legend(loc="center left", fontsize=8)
 
@@ -446,7 +466,10 @@ def main():
             payload = pickle.load(f)
         print(f"[info] existing ROI table found, skip solving: {roi_table_file}", flush=True)
         print(summarize(payload), flush=True)
-        plot_reachability(payload, fig_file, T_left, T_right)
+        masks = None
+        if os.path.exists(danger_npz):
+            masks = load_masks(danger_npz)
+        plot_reachability(payload, fig_file, T_left, T_right, masks)
         return
 
     if not os.path.exists(danger_npz):
@@ -475,7 +498,7 @@ def main():
         pickle.dump(payload, f, protocol=4)
     print(f"Saved ROI table to {roi_table_file}", flush=True)
     print(summarize(payload), flush=True)
-    plot_reachability(payload, fig_file, T_left, T_right)
+    plot_reachability(payload, fig_file, T_left, T_right, masks)
 
 
 if __name__ == "__main__":
