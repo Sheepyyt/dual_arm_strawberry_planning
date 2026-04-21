@@ -1,73 +1,33 @@
-
 #!/usr/bin/env python3
 """
-test_ompl_single_arm_debug.py
-
-最小 OMPL 单臂测试脚本：
-- 读取 roi_table_selected_points.pkl（或用户指定 ROI pkl）
-- 读取 danger_zone_data.npz
-- 为一个指定 arm / point 组合，使用 goal_solutions 作为 GoalStates
-- 分别尝试：
-    1) safe path: 避开 grid_I_upper / grid_I_lower
-    2) free path: 不避让危险区
-- 可视化：
-    a) XY 平面下若干关键姿态叠加图
-    b) 关节轨迹折线图
+OMPL 单臂测试脚本（建议放到项目根目录的 ompl/ 文件夹内使用）
+- 默认从 ../roi/results/ 读取 roi_table_selected_points.pkl 和 danger_zone_data.npz
+- 优先使用 safe 终点解；若点本身在危险区，则直接跳过 safe 搜索转入 fallback
+- mode=auto 时按上述规则自动选择
+- mode=safe 时仅使用 safe 解
+- mode=free 时优先使用 fallback 解，若没有则退回全部 goal_solutions
 """
 import os
 import sys
-import math
 import pickle
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-
 from ompl import base as ob
 from ompl import geometric as og
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
+ROI_DIR = os.path.join(PROJECT_ROOT, "roi")
+ROI_RESULTS_DIR = os.path.join(ROI_DIR, "results")
+OMPL_RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")
+os.makedirs(OMPL_RESULTS_DIR, exist_ok=True)
+if ROI_DIR not in sys.path:
+    sys.path.insert(0, ROI_DIR)
 
 from build_roi_table import CONFIG as BASE_CONFIG, load_base_transforms_from_urdf
-from compute_danger_zone import URDFArmChain, ROI_UPPER, ROI_LOWER, LINK_RADIUS
-
-
-def build_parser():
-    p = argparse.ArgumentParser()
-    p.add_argument("--roi-pkl", type=str, default=os.path.join(SCRIPT_DIR, "results", "roi_table_selected_points.pkl"))
-    p.add_argument("--danger-npz", type=str, default=os.path.join(SCRIPT_DIR, "results", "danger_zone_data.npz"))
-    p.add_argument("--arm", choices=["L", "R"], required=True)
-    p.add_argument("--key", type=str, required=True, help="point key like 0.000_0.300_0.560")
-    p.add_argument("--mode", choices=["safe", "free"], default="safe")
-    p.add_argument("--solve-time", type=float, default=1.0)
-    p.add_argument("--num-trials", type=int, default=5)
-    p.add_argument("--interpolate-count", type=int, default=100)
-    p.add_argument("--resolution", type=float, default=0.01)
-    p.add_argument("--planner", choices=["RRTConnect", "RRTstar"], default="RRTConnect")
-    return p
-
-
-def choose_half(y):
-    if y >= 0.25:
-        return "upper"
-    elif y <= -0.25:
-        return "lower"
-    return "middle"
-
-
-def load_masks(npz_path):
-    z = np.load(npz_path)
-    extent = z["extent"]
-    res = float(z["res"][0])
-    return {
-        "grid_I_upper": z["grid_I_upper"],
-        "grid_I_lower": z["grid_I_lower"],
-        "extent": extent,
-        "res": res,
-    }
+from compute_danger_zone import URDFArmChain
 
 
 class DangerMask2D:
@@ -95,6 +55,31 @@ class DangerMask2D:
             if self.point_in_mask(float(p[0]), float(p[1])):
                 return True
         return False
+
+
+def build_parser():
+    p = argparse.ArgumentParser()
+    p.add_argument("--roi-pkl", type=str, default=os.path.join(ROI_RESULTS_DIR, "roi_table_selected_points.pkl"))
+    p.add_argument("--danger-npz", type=str, default=os.path.join(ROI_RESULTS_DIR, "danger_zone_data.npz"))
+    p.add_argument("--arm", choices=["L", "R"], required=True)
+    p.add_argument("--key", type=str, required=True)
+    p.add_argument("--mode", choices=["auto", "safe", "free"], default="auto")
+    p.add_argument("--solve-time", type=float, default=1.0)
+    p.add_argument("--num-trials", type=int, default=5)
+    p.add_argument("--interpolate-count", type=int, default=100)
+    p.add_argument("--resolution", type=float, default=0.01)
+    p.add_argument("--planner", choices=["RRTConnect", "RRTstar"], default="RRTConnect")
+    return p
+
+
+def load_masks(npz_path):
+    z = np.load(npz_path)
+    extent = z["extent"]
+    res = float(z["res"][0])
+    return {
+        "upper": DangerMask2D(z["grid_I_upper"], extent, res),
+        "lower": DangerMask2D(z["grid_I_lower"], extent, res),
+    }
 
 
 def state_to_q(state, dof):
@@ -143,9 +128,7 @@ class CustomStateValidityChecker(ob.StateValidityChecker):
 
 
 def choose_planner(si, planner_name):
-    if planner_name == "RRTstar":
-        return og.RRTstar(si)
-    return og.RRTConnect(si)
+    return og.RRTstar(si) if planner_name == "RRTstar" else og.RRTConnect(si)
 
 
 class MultipleGoalStates(ob.GoalSampleableRegion):
@@ -156,14 +139,13 @@ class MultipleGoalStates(ob.GoalSampleableRegion):
 
     def distanceGoal(self, state):
         dists = [self.getSpaceInformation().getStateSpace().distance(state, g) for g in self.states]
-        return min(dists) if dists else float('inf')
+        return min(dists) if dists else float("inf")
 
     def sampleGoal(self, state):
         import random
-        if not self.states:
-            return
-        g = random.choice(self.states)
-        self.getSpaceInformation().getStateSpace().copyState(state, g)
+        if self.states:
+            g = random.choice(self.states)
+            self.getSpaceInformation().getStateSpace().copyState(state, g)
 
     def maxSampleCount(self):
         return len(self.states)
@@ -178,29 +160,18 @@ def plan_one_trial(space, joint_limits, q_home, goals, chain, mask_obj, solve_ti
     checker = CustomStateValidityChecker(si, chain, mask_obj, len(joint_limits))
     ss.setStateValidityChecker(checker)
     si.setStateValidityCheckingResolution(float(resolution))
-
-    start = q_to_state(space, q_home)
-    ss.setStartState(start)
-
-    goal_states_list = []
-    for qg in goals:
-        goal_states_list.append(q_to_state(space, qg))
-    
-    mg = MultipleGoalStates(si, goal_states_list)
-    ss.setGoal(mg)
-
+    ss.setStartState(q_to_state(space, q_home))
+    goal_states_list = [q_to_state(space, qg) for qg in goals]
+    ss.setGoal(MultipleGoalStates(si, goal_states_list))
     ss.setPlanner(choose_planner(si, planner_name))
     ss.setup()
-
     solved = ss.solve(float(solve_time))
     if not solved:
         return None
-
     ss.simplifySolution()
     path = ss.getSolutionPath()
     path.interpolate(int(interpolate_count))
-    q_path = np.asarray([state_to_q(path.getState(i), len(joint_limits)) for i in range(path.getStateCount())], dtype=float)
-    return q_path
+    return np.asarray([state_to_q(path.getState(i), len(joint_limits)) for i in range(path.getStateCount())], dtype=float)
 
 
 def path_time(q_path):
@@ -208,37 +179,56 @@ def path_time(q_path):
         return None
     total = 0.0
     for i in range(len(q_path) - 1):
-        dq = np.abs(q_path[i + 1] - q_path[i])
-        total += float(np.max(dq))
+        total += float(np.max(np.abs(q_path[i + 1] - q_path[i])))
     return total
 
 
-def plot_result(out_png, key, arm, mode, point_xyz, danger, chain, q_path, T_left, T_right):
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+def select_goals(arm_data, mode, point_in_danger):
+    safe_goals = [np.asarray(q, dtype=float) for q in arm_data.get("safe_goal_solutions", [])]
+    fallback_goals = [np.asarray(q, dtype=float) for q in arm_data.get("fallback_goal_solutions", [])]
+    all_goals = [np.asarray(q, dtype=float) for q in arm_data.get("goal_solutions", [])]
 
+    if mode == "safe":
+        return safe_goals, "safe"
+    if mode == "free":
+        return (fallback_goals or all_goals), "free"
+
+    # auto
+    if point_in_danger:
+        return (fallback_goals or all_goals), "free"
+    if safe_goals:
+        return safe_goals, "safe"
+    return (fallback_goals or all_goals), "free"
+
+
+def count_valid_goals(goals, chain, mask_obj):
+    valid = []
+    for q in goals:
+        if check_state_valid(chain, mask_obj, q):
+            valid.append(q)
+    return valid
+
+
+def plot_result(out_png, key, arm, used_mode, point_xyz, danger, chain, q_path, T_left, T_right):
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     ax = axes[0]
-    veh = patches.Rectangle((-0.50, -0.25), 1.0, 0.50, linewidth=2, edgecolor="gray",
-                            facecolor="lightgray", alpha=0.25, linestyle="--")
+    veh = patches.Rectangle((-0.50, -0.25), 1.0, 0.50, linewidth=2, edgecolor="gray", facecolor="lightgray", alpha=0.25, linestyle="--")
     ax.add_patch(veh)
     ax.scatter(T_left[0, 3], T_left[1, 3], c="#819CC4", marker="*", s=140)
     ax.scatter(T_right[0, 3], T_right[1, 3], c="#8CC19A", marker="*", s=140)
     ax.scatter([point_xyz[0]], [point_xyz[1]], c="red", marker="x", s=80, label="target")
-
-    # overlay danger mask
     if danger is not None:
         ix, iy = np.where(danger.grid)
         xs = danger.x_min + (ix + 0.5) * danger.res
         ys = danger.y_min + (iy + 0.5) * danger.res
         ax.scatter(xs, ys, s=2, c="orange", alpha=0.2, label="danger mask")
-
     if q_path is not None:
-        n_show = min(8, len(q_path))
-        idxs = np.linspace(0, len(q_path) - 1, n_show).astype(int)
+        idxs = np.linspace(0, len(q_path) - 1, min(8, len(q_path))).astype(int)
         for idx in idxs:
             pts = chain.fk_all_frames(q_path[idx])
             ax.plot(pts[:, 0], pts[:, 1], "-", lw=1.0, alpha=0.7)
             ax.plot(pts[-1, 0], pts[-1, 1], "o", ms=3)
-    ax.set_title(f"{arm} arm {mode} path overlay")
+    ax.set_title(f"{arm} arm {used_mode} path overlay")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_aspect("equal")
@@ -251,13 +241,13 @@ def plot_result(out_png, key, arm, mode, point_xyz, danger, chain, q_path, T_lef
     if q_path is not None:
         for j in range(q_path.shape[1]):
             ax2.plot(q_path[:, j], label=f"q{j+1}")
+        ax2.legend(fontsize=7, ncol=2)
     ax2.set_title("Joint trajectory")
     ax2.set_xlabel("path step")
     ax2.set_ylabel("joint value")
     ax2.grid(True, alpha=0.3)
-    ax2.legend(fontsize=7, ncol=2)
 
-    fig.suptitle(f"OMPL single-arm test | key={key} | arm={arm} | mode={mode}")
+    fig.suptitle(f"OMPL single-arm test | key={key} | arm={arm} | mode={used_mode}")
     fig.tight_layout()
     fig.savefig(out_png, dpi=220, bbox_inches="tight")
     print(f"Saved figure to {out_png}", flush=True)
@@ -266,53 +256,52 @@ def plot_result(out_png, key, arm, mode, point_xyz, danger, chain, q_path, T_lef
 def main():
     args = build_parser().parse_args()
     cfg = dict(BASE_CONFIG)
-
     with open(args.roi_pkl, "rb") as f:
         roi = pickle.load(f)
-
     item = roi["data"][args.key]
     point_xyz = item["vehicle_xyz"]
+    half = item.get("half", "upper" if point_xyz[1] >= 0.25 else "lower")
+    point_in_danger = bool(item["left"].get("point_in_danger", False) if args.arm == "L" else item["right"].get("point_in_danger", False))
     arm_key = "left" if args.arm == "L" else "right"
     arm_data = item[arm_key]
-    goals = [np.asarray(q, dtype=float) for q in arm_data.get("goal_solutions", [])]
-    if not goals:
-        raise RuntimeError(f"No goal_solutions for {args.arm} @ {args.key}")
 
-    half = choose_half(point_xyz[1])
     masks = load_masks(args.danger_npz)
-    mask_obj = None
-    if args.mode == "safe":
-        if half == "upper":
-            mask_obj = DangerMask2D(masks["grid_I_upper"], masks["extent"], masks["res"])
-        elif half == "lower":
-            mask_obj = DangerMask2D(masks["grid_I_lower"], masks["extent"], masks["res"])
+    active_mask = masks[half] if args.mode in ("safe", "auto") else None
+    used_goals, used_mode = select_goals(arm_data, args.mode, point_in_danger)
+    if not used_goals:
+        raise RuntimeError(f"No candidate goals for {args.arm} @ {args.key} under mode={args.mode}")
 
     urdf_path = cfg["urdf_path"]
-    T_left, T_right = load_base_transforms_from_urdf(
-        urdf_path, cfg["left_base_joint"], cfg["right_base_joint"]
-    )
-    if args.arm == "L":
-        chain = URDFArmChain(urdf_path, cfg["left_base_joint"], "left_arm")
-    else:
-        chain = URDFArmChain(urdf_path, cfg["right_base_joint"], "right_arm")
-
+    T_left, T_right = load_base_transforms_from_urdf(urdf_path, cfg["left_base_joint"], cfg["right_base_joint"])
+    chain = URDFArmChain(urdf_path, cfg["left_base_joint"], "left_arm") if args.arm == "L" else URDFArmChain(urdf_path, cfg["right_base_joint"], "right_arm")
     q_home = np.asarray(cfg["q_seed"], dtype=float)
     space = build_space(chain.joint_limits)
 
-    best_path = None
-    best_cost = None
+    # For safe/auto-safe, prune invalid terminal states before planning
+    planner_mask = active_mask if used_mode == "safe" else None
+    if used_mode == "safe":
+        valid_goals = count_valid_goals(used_goals, chain, planner_mask)
+        print(f"[goal filter] total={len(used_goals)} valid_safe={len(valid_goals)} point_in_danger={point_in_danger}", flush=True)
+        used_goals = valid_goals
+    else:
+        print(f"[goal filter] total={len(used_goals)} mode={used_mode} point_in_danger={point_in_danger}", flush=True)
+
+    if not used_goals:
+        print("[result] no valid goal states before planning", flush=True)
+        out_png = os.path.join(OMPL_RESULTS_DIR, f"ompl_test_{args.arm}_{args.key.replace('.', 'p')}_{used_mode}.png")
+        plot_result(out_png, args.key, args.arm, used_mode, point_xyz, planner_mask, chain, None, T_left, T_right)
+        return
+
+    best_path, best_cost = None, None
     for trial in range(args.num_trials):
-        q_path = plan_one_trial(space, chain.joint_limits, q_home, goals, chain, mask_obj,
-                                args.solve_time, args.resolution, args.planner, args.interpolate_count)
+        q_path = plan_one_trial(space, chain.joint_limits, q_home, used_goals, chain, planner_mask, args.solve_time, args.resolution, args.planner, args.interpolate_count)
         c = path_time(q_path)
         print(f"[trial {trial+1}/{args.num_trials}] success={q_path is not None} cost={c}", flush=True)
         if q_path is not None and (best_cost is None or c < best_cost):
-            best_cost = c
-            best_path = q_path
+            best_cost, best_path = c, q_path
 
-    out_png = os.path.join(SCRIPT_DIR, "results", f"ompl_test_{args.arm}_{args.key.replace('.', 'p')}_{args.mode}.png")
-    plot_result(out_png, args.key, args.arm, args.mode, point_xyz, mask_obj, chain, best_path, T_left, T_right)
-
+    out_png = os.path.join(OMPL_RESULTS_DIR, f"ompl_test_{args.arm}_{args.key.replace('.', 'p')}_{used_mode}.png")
+    plot_result(out_png, args.key, args.arm, used_mode, point_xyz, planner_mask, chain, best_path, T_left, T_right)
     if best_path is None:
         print("[result] no path found", flush=True)
     else:
