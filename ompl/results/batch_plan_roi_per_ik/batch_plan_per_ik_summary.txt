@@ -1,0 +1,9 @@
+output_dir: /home/yyt/dual_arm_strawberry_planning/ompl/results/batch_plan_roi_per_ik
+figure_dir: /home/yyt/dual_arm_strawberry_planning/ompl/results/batch_plan_roi_per_ik/figures
+total arm-point-ik tasks: 1115
+successful plans: 1115
+safe plans: 268
+fallback/free plans: 847
+failed plans: 0
+saved figures: 70
+figure policy: one best successful IK per (key, arm)
