@@ -51,43 +51,6 @@ def example_real_cost_all_points():
     return planner
 
 
-def example_real_cost_sampled():
-    print("\n=== Point-motion Real Cost Example 2: Sampled by label ===\n")
-    planner = RealCostPlanner()
-
-    task_df = planner.create_task_dataset(
-        points_per_label={
-            "parallel": 12,
-            "serial_upper": 4,
-            "serial_lower": 4,
-        },
-        random_seed=42,
-    )
-    print(f"Loaded {len(task_df)} sampled tasks.")
-    print(task_df[[
-        "key", "x", "y", "label", "allowed_arms", "must_assign_to",
-        "time_to_L", "time_to_R"
-    ]].to_string())
-    print()
-
-    print("Running optimization...")
-    heuristic_actions, milp_actions, improvement = planner.solve_optimization(
-        time_limit=20,
-        heuristic_name="spatial_order",
-    )
-
-    heuristic_makespan = max(a["end"] for a in heuristic_actions)
-    milp_makespan = max(a["end"] for a in milp_actions) if milp_actions else heuristic_makespan
-
-    print(f"\nHeuristic makespan: {heuristic_makespan:.2f}s")
-    print(f"MILP makespan:      {milp_makespan:.2f}s")
-    print(f"Improvement:        {improvement:.1f}%")
-
-    result_dir = os.path.join(SCRIPT_DIR, "results", "real_cost_example_sampled")
-    planner.save_results(result_dir)
-    return planner
-
-
 def example_real_cost_specified():
     print("\n=== Point-motion Real Cost Example 3: Specified task locations ===\n")
     planner = RealCostPlanner()
@@ -125,35 +88,12 @@ def example_real_cost_specified():
     return planner
 
 
-def example_compare_baseline_and_real_cost():
-    print("\n=== Point-motion Real Cost Example 4: Compare Baseline vs Real Cost ===\n")
-    np.random.seed(0)
-
-    baseline = BaselinePlanner()
-    baseline.create_task_dataset({"B1": 4, "B2": 3, "B3": 4, "B4": 4, "B5": 3, "B6": 4})
-    b_h, b_m, _ = baseline.solve_optimization(time_limit=20)
-    b_ms = max(a["end"] for a in b_m) if b_m else max(a["end"] for a in b_h)
-
-    real_cost = RealCostPlanner()
-    real_cost.create_task_dataset(points_per_label={"parallel": 12, "serial_upper": 4, "serial_lower": 4}, random_seed=0)
-    rc_h, rc_m, _ = real_cost.solve_optimization(time_limit=20)
-    rc_ms = max(a["end"] for a in rc_m) if rc_m else max(a["end"] for a in rc_h)
-
-    print("\n=== Mode Comparison ===")
-    print(f"{'Mode':<18} | {'Makespan (s)':<14} | {'Cost Model':<35}")
-    print("-" * 80)
-    print(f"{'Baseline':<18} | {b_ms:<14.2f} | Euclidean distance + B1-B6")
-    print(f"{'Point-motion RealCost':<18} | {rc_ms:<14.2f} | OMPL-derived point-motion table")
-
-
 if __name__ == "__main__":
     print("Dual-Arm Strawberry Harvesting — Point-motion Real Cost Examples")
     print("=" * 70)
 
     example_real_cost_all_points()
-    # example_real_cost_sampled()
     # example_real_cost_specified()
-    # example_compare_baseline_and_real_cost()
 
     print("\n" + "=" * 70)
     print("Done. Check planning/results/ for outputs.")
