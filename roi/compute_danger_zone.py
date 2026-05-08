@@ -27,7 +27,7 @@ from matplotlib.colors import ListedColormap
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 URDF_PATH = os.path.join(SCRIPT_DIR, "..", "urdf", "dual_arm_ik_xy_centered.urdf")
-RESULT_DIR = os.path.join(SCRIPT_DIR, "results")
+RESULT_DIR = os.path.join(SCRIPT_DIR, "results", "danger")
 
 # Occupancy grid resolution (metres per cell)
 GRID_RES = 0.005

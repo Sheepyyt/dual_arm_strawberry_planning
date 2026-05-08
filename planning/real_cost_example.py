@@ -6,7 +6,7 @@ real_cost_example.py — point-motion Real Cost 模式示例
 - Baseline 模式保持不变，仍在 dual_arm_planner.py 中
 - 当前 RealCostPlanner 已替换为 point-motion 版本
 - 它读取：
-    ompl/results/point_motion_table/point_motion_table_selected_points.pkl
+    ompl/results/point_table/point_table.pkl
   作为优化器输入
 """
 

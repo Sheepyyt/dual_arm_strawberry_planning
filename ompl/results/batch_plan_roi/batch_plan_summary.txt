@@ -1,5 +1,0 @@
-total arm-point tasks: 108
-successful plans: 70
-safe plans: 34
-fallback/free plans: 36
-failed plans: 38

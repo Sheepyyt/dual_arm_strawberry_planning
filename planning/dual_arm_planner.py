@@ -1100,7 +1100,7 @@ def _load_urdf_base_xy(urdf_path: str) -> Tuple[np.ndarray, np.ndarray]:
 
 
 
-_DEFAULT_POINT_TABLE = os.path.join(_REPO_ROOT, "ompl", "results", "point_motion_table", "point_motion_table_selected_points.pkl")
+_DEFAULT_POINT_TABLE = os.path.join(_REPO_ROOT, "ompl", "results", "point_table", "point_table.pkl")
 
 
 def _create_key(x: float, y: float, z: float = 0.56) -> str:
@@ -1120,7 +1120,7 @@ class RealCostPlanner(DualArmPlannerCore):
     """
     Point-motion 版 Real Cost 规划模式。
     - 机械臂基座：从 URDF 解析（与旧版一致）
-    - 数据来源：ompl/results/point_motion_table/point_motion_table_selected_points.pkl
+    - 数据来源：ompl/results/point_table/point_table.pkl
     - 不再使用 B1-B6 / B2-B5 干涉区逻辑
     - 直接使用 point-level motion table 中的:
         label            -> parallel / serial_upper / serial_lower

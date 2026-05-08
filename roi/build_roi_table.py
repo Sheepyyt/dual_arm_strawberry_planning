@@ -23,11 +23,11 @@ CONFIG = {
     "right_base_joint": "vehicle_to_right_arm",
 
     # ---------- output ----------
-    "roi_table_file": os.path.join(os.path.dirname(os.path.abspath(__file__)), "results/roi_table.pkl"),
-    "dual_arm_cost_file": os.path.join(os.path.dirname(os.path.abspath(__file__)), "results/dual_arm_cost.pkl"),
+    "roi_table_file": os.path.join(os.path.dirname(os.path.abspath(__file__)), "results/grid/roi_table.pkl"),
+    "dual_arm_cost_file": os.path.join(os.path.dirname(os.path.abspath(__file__)), "results/grid/dual_arm_cost.pkl"),
 
     # ---------- regenerate ----------
-    "force_regenerate": True,
+    "force_regenerate": False,
 
     # ---------- speed / quality ----------
     "dist_eps": 0.001,
@@ -360,6 +360,9 @@ def generate_dual_arm_roi_table(cfg):
                 if entry_right["best_time"] is not None:
                     right_cost[key] = float(entry_right["best_time"])
 
+    os.makedirs(os.path.dirname(cfg["roi_table_file"]), exist_ok=True)
+    os.makedirs(os.path.dirname(cfg["dual_arm_cost_file"]), exist_ok=True)
+
     roi_payload = {
         "data": roi,
         "ranges": {
@@ -391,6 +394,102 @@ def generate_dual_arm_roi_table(cfg):
     print(f"Saved cost table to {cfg['dual_arm_cost_file']}", flush=True)
 
     return roi_payload, left_cost, right_cost, T_left, T_right
+
+
+
+
+# =========================================================
+# plotting (integrated from old plot_roi_coverage.py)
+# =========================================================
+def _draw_vehicle(ax, T_left, T_right):
+    x_min, x_max = -0.50, 0.50
+    y_min, y_max = -0.25, 0.25
+    import matplotlib.patches as patches
+    rect = patches.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min,
+                             linewidth=2, edgecolor="gray", facecolor="lightgray",
+                             alpha=0.25, linestyle="--", label="Vehicle body")
+    ax.add_patch(rect)
+    x_center = 0.5 * (x_min + x_max)
+    y_center = 0.5 * (y_min + y_max)
+    ax.arrow(x_center, y_center, 0.18, 0.0, width=0.01, head_width=0.05,
+             head_length=0.04, length_includes_head=True, color="black", alpha=0.8)
+    ax.text(x_center + 0.20, y_center + 0.02, "Forward (+x)", fontsize=10, color="black")
+
+
+def _setup_ax(ax, title, T_left, T_right):
+    import matplotlib.patches as patches
+    _draw_vehicle(ax, T_left, T_right)
+    # ROI side bands
+    ax.add_patch(patches.Rectangle((-0.5, 0.25), 1.0, 0.40, linewidth=1.5, edgecolor="blue", facecolor="none"))
+    ax.add_patch(patches.Rectangle((-0.5, -0.65), 1.0, 0.40, linewidth=1.5, edgecolor="green", facecolor="none"))
+    ax.set_title(title, fontsize=11)
+    ax.set_xlabel("x in vehicle frame (m)")
+    ax.set_ylabel("y in vehicle frame (m)")
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.4)
+    ax.scatter(T_left[0, 3], T_left[1, 3], c="#819CC4", marker="*", s=200, label="Left arm base", zorder=5)
+    ax.scatter(T_right[0, 3], T_right[1, 3], c="#8CC19A", marker="*", s=200, label="Right arm base", zorder=5)
+
+
+def plot_dual_arm_roi(roi_payload, cfg, T_left, T_right):
+    import matplotlib.pyplot as plt
+    target_z = float(roi_payload["ranges"]["z"][0])
+    roi = roi_payload["data"]
+    left_groups = {"unreachable": [], "reachable": []}
+    right_groups = {"unreachable": [], "reachable": []}
+    summary_groups = {"both_unreachable": [], "left_only": [], "right_only": [], "both_reachable": []}
+
+    for key, item in roi.items():
+        x, y, z = item["vehicle_xyz"]
+        if not np.isclose(z, target_z, atol=1e-6):
+            continue
+        cls_left = classify_entry(item["left"], cfg["step_yaw"])
+        cls_right = classify_entry(item["right"], cfg["step_yaw"])
+        left_groups[cls_left].append((x, y))
+        right_groups[cls_right].append((x, y))
+        left_ok = (cls_left != "unreachable")
+        right_ok = (cls_right != "unreachable")
+        if left_ok and right_ok:
+            summary_groups["both_reachable"].append((x, y))
+        elif left_ok and (not right_ok):
+            summary_groups["left_only"].append((x, y))
+        elif (not left_ok) and right_ok:
+            summary_groups["right_only"].append((x, y))
+        else:
+            summary_groups["both_unreachable"].append((x, y))
+
+    fig, axes = plt.subplots(1, 3, figsize=(21, 7))
+    fig.suptitle(f"Dual-Arm IK Coverage @ z = {target_z:.3f} m (vehicle frame)", fontsize=12)
+    ax = axes[0]
+    _setup_ax(ax, f"Left-arm IK coverage @ z={target_z:.3f}", T_left, T_right)
+    for cls, pts in left_groups.items():
+        if pts:
+            pts = np.asarray(pts)
+            ax.scatter(pts[:, 0], pts[:, 1], s=14, c={"unreachable": "#BB5F76", "reachable": "#AFC4E4"}[cls], label=cls)
+    ax.legend(loc="center left", fontsize=8)
+
+    ax = axes[1]
+    _setup_ax(ax, f"Right-arm IK coverage @ z={target_z:.3f}", T_left, T_right)
+    for cls, pts in right_groups.items():
+        if pts:
+            pts = np.asarray(pts)
+            ax.scatter(pts[:, 0], pts[:, 1], s=14, c={"unreachable": "#BB5F76", "reachable": "#BEE4C8"}[cls], label=cls)
+    ax.legend(loc="center left", fontsize=8)
+
+    ax = axes[2]
+    _setup_ax(ax, f"Combined accessibility @ z={target_z:.3f}", T_left, T_right)
+    colors = {"both_unreachable": "#BB5F76", "left_only": "#AFC4E4", "right_only": "#BEE4C8", "both_reachable": "#5B71B5"}
+    for cls, pts in summary_groups.items():
+        if pts:
+            pts = np.asarray(pts)
+            ax.scatter(pts[:, 0], pts[:, 1], s=14, c=colors[cls], label=cls)
+    ax.legend(loc="center left", fontsize=8)
+
+    fig.tight_layout()
+    fig_path = os.path.join(os.path.dirname(cfg["roi_table_file"]), "dual_arm_roi_coverage.png")
+    plt.savefig(fig_path, dpi=250, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved figure to {fig_path}")
 
 
 # =========================================================

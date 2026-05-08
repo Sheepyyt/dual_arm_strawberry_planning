@@ -1,184 +1,226 @@
-# 在固定停车点下的双机械臂草莓采摘规划
+# 双机械臂草莓采摘规划（固定停车点）
 
-## 项目概述
+本项目面向**固定停车点**场景下的双机械臂草莓采摘顺序优化。当前工程保留两种模式：
 
-本项目研究双机械臂车辆在**固定停车点**下的最优草莓采摘顺序规划，目标是**最小化总完工时间（Makespan）**。车辆停在固定位置，两条机械臂分别从各自基座出发对周围草莓区域执行采摘任务，完成每次采摘后需回到初始位置（篮子）放置草莓，再执行下一次采摘。
-
----
-
-## 问题定义
-
-### 核心假设与设定
-
-1. **采摘-放置循环（Pick-and-Place Cycle）**  
-   每次采摘完一颗草莓后，机械臂需要将其放入车上的篮子。因此每次采摘动作均从"基座（篮子位置）→ 草莓 → 基座"构成一个完整的往返动作。每颗草莓的**处理时间**定义为：
-   ```
-   处理时间 = 2 × 单程移动时间 + 固定处理时间
-   ```
-   其中固定处理时间（`base_operation_time`）包含夹取、放置等操作耗时。
-
-2. **区域划分：干涉区与非干涉区**  
-   为简化三维碰撞检测问题，将草莓生长空间划分为 6 个正方形区域（B1～B6）：
-
-   | 区域 | 位置     | 可达臂 | 类型       |
-   |------|----------|--------|------------|
-   | B1   | 左上     | 左臂   | 非干涉区   |
-   | B2   | 中上     | 双臂均可达 | **干涉区** |
-   | B3   | 右上     | 右臂   | 非干涉区   |
-   | B4   | 左下     | 左臂   | 非干涉区   |
-   | B5   | 中下     | 双臂均可达 | **干涉区** |
-   | B6   | 右下     | 右臂   | 非干涉区   |
-
-   - **非干涉区**（B1/B3/B4/B6）：双臂可以同时在此区域独立作业，不会发生碰撞。
-   - **干涉区**（B2/B5）：双臂不得同时在该区域内作业，必须**串行执行**，即一臂在干涉区采摘时，另一臂必须等待或在其他区域作业。
-
-3. **末端执行器姿态约束**  
-   末端仅可绕 yaw 方向转动（roll/pitch 固定为名义值）。采摘时对每个目标点沿 yaw 方向进行离散搜索，选择 IK 可解且代价最优的姿态。
-
-4. **平面化处理（当前实现）**  
-   当前代码仅考虑二维平面规划（z = 0.56m 固定高度切片），忽略垂直方向变化。
+- **Baseline 模式**：原始、简化的区域规则与欧氏代价模型
+- **Real Cost 模式（point-motion）**：基于 ROI + OMPL + 点级轨迹安全规则的真实代价模式
 
 ---
 
-## 两种规划模式
+## 当前工程结构
 
-本项目提供两种规划模式，均支持启发式算法和 MILP 精确优化，可按需选择：
-
----
-
-### 模式一：Baseline 模式（`BaselinePlanner`）
-
-**适用场景**：快速原型验证、算法对比实验、无需 IK 求解的轻量场景。
-
-**机械臂模型来源**：手工设定基座坐标。
-- 默认左臂基座：`[-0.3, 0.0]`
-- 默认右臂基座：`[0.3, 0.0]`
-
-**单程移动代价**：用欧氏距离近似移动时间（无需 IK 计算）。
-
-**任务生成方式**：在矩形区域内连续均匀随机采样，坐标可以是区域内任意浮点数。
-
-**启发式调度顺序**：
-- 左臂：B2 → B1 → B4（先处理干涉区，再处理本侧区域）
-- 右臂：B5 → B6 → B3
-
-**MILP 可达性**：直接使用区域配置的 `arm_access` 字段。
-
-**代码示例**：
-```python
-from planning.dual_arm_planner import BaselinePlanner  # 或 DualArmPlanner（向后兼容别名）
-import numpy as np
-
-np.random.seed(42)
-planner = BaselinePlanner()
-planner.create_task_dataset({"B1": 5, "B2": 2, "B3": 2, "B4": 3, "B5": 2, "B6": 4})
-heuristic, milp, improvement = planner.solve_optimization(time_limit=30)
-planner.save_results("results/baseline_run")
-```
-
-参见 `planning/baseline.py` 获取完整使用示例。
-
----
-
-### 模式二：Real Cost 模式（`RealCostPlanner`）
-
-**适用场景**：追求更真实代价模型的规划实验，需预先生成 cost table。
-
-**机械臂模型来源**：从 `urdf/dual_arm_ik_xy_centered.urdf` 文件解析，与 `roi/build_roi_table.py` 中生成 cost table 时完全一致，确保代价模型与调度模型之间的一致性。
-- 左臂基座（x, y）：由 URDF 中 `vehicle_to_left_arm` 关节解析得到
-- 右臂基座（x, y）：由 URDF 中 `vehicle_to_right_arm` 关节解析得到
-
-**单程移动代价**：从预计算的 cost table（`roi/results/dual_arm_cost.pkl`）查表获得，代价值为从 home 姿态出发的最小关节空间运动量（IK 真实代价），不使用欧氏距离近似。
-
-**任务生成方式**：只从 cost table 中的可达网格离散点（步长 0.02m）里采样，不支持连续坐标或插值。
-
-**区域可达性策略**：
-- **B1/B4（强制 L-only）**：即使 cost table 显示右臂也可达，也仍强制设为仅左臂可达，`accessible_by = ["L"]`。
-- **B3/B6（强制 R-only）**：即使 cost table 显示左臂也可达，也仍强制设为仅右臂可达，`accessible_by = ["R"]`。
-- **B2/B5（干涉区，按点可达性）**：
-  - 某点仅左臂可达 → `accessible_by = ["L"]`
-  - 某点仅右臂可达 → `accessible_by = ["R"]`
-  - 某点双臂均可达 → `accessible_by = ["L", "R"]`
-
-**启发式调度**（预分配 + 分离调度）：
-1. 预分配 B2/B5 中每颗草莓的归属：
-   - B2：仅左臂可达的点和双臂均可达的点均分配给左臂，仅右臂可达的点分配给右臂
-   - B5：仅右臂可达的点和双臂均可达的点均分配给右臂，仅左臂可达的点分配给左臂
-2. 按预分配结果调度（左右臂同时从 t=0 开始工作）：
-   - 左臂：B2（L 分配任务）→ B1 → B4 → B5（L 分配任务）
-   - 右臂：B5（R 分配任务）→ B6 → B3 → B2（R 分配任务）
-
-**代码示例**：
-```python
-from planning.dual_arm_planner import RealCostPlanner
-import numpy as np
-
-np.random.seed(42)
-planner = RealCostPlanner()  # 自动从默认路径加载 URDF 和 cost table
-planner.create_task_dataset({"B1": 5, "B2": 3, "B3": 5, "B4": 4, "B5": 3, "B6": 4})
-heuristic, milp, improvement = planner.solve_optimization(time_limit=30)
-planner.save_results("results/real_cost_run")
-```
-
-参见 `planning/real_cost_example.py` 获取完整使用示例。
-
----
-
-## 优化算法
-
-两种模式共用相同的 MILP 建模与启发式框架：
-
-### 启发式算法（Spatial Order Heuristic）
-- 基于区域空间顺序的贪心调度，优先处理干涉区，再处理本侧专属区域。
-- 在干涉区内，按处理时间升序调度，并尊重区域互斥约束。
-- 产生可行初解，作为 MILP 求解器的热启动（Warm Start）。
-
-### MILP 精确优化
-- 基于 Gurobi 求解器，构建混合整数线性规划模型。
-- 决策变量包括：任务分配变量（`x`）、任务开始时间（`t`）、完工时间（`T`）、顺序变量（`o`、`y`）。
-- 约束包括：分配唯一性、可达性、同臂顺序、干涉区串行、完工时间下界。
-- 目标：最小化总完工时间 T。
-
-详见 `planning/milp_formulation.md` 获取完整数学建模说明。
-
----
-
-## 类继承结构
-
-```
-DualArmPlannerCore（基类）
-├── BaselinePlanner（Baseline 模式）
-│     别名：DualArmPlanner（向后兼容）
-└── RealCostPlanner（Real Cost 模式）
-```
-
-- `DualArmPlannerCore`：封装所有共用逻辑（MILP 建模、求解、热启动、可视化、结果保存等）。
-- `BaselinePlanner`：覆写代价函数（欧氏距离）、任务采样（连续随机）和启发式（B2→B1→B4）。
-- `RealCostPlanner`：覆写代价函数（cost table 查表）、任务采样（网格点）、启发式（预分配版）；机械臂定义完全来自 URDF。
-
----
-
-## 目录结构
-
-```
+```text
 .
 ├── planning/
-│   ├── dual_arm_planner.py      # 核心规划器（DualArmPlannerCore / BaselinePlanner / RealCostPlanner）
-│   ├── baseline.py              # Baseline 模式使用示例
-│   ├── real_cost_example.py     # Real Cost 模式使用示例
-│   ├── milp_formulation.md      # MILP 数学建模文档
-│   └── results/                 # 结果输出目录（动画、甘特图等）
-├── roi/
-│   ├── build_roi_table.py       # cost table 生成脚本（需要 tracikpy）
-│   ├── plot_roi_coverage.py     # ROI 可视化工具
+│   ├── baseline.py
+│   ├── dual_arm_planner.py
+│   ├── milp_formulation.md
+│   ├── real_cost_example.py
 │   └── results/
-│       ├── dual_arm_cost.pkl    # cost table（预计算，IK 真实代价）
-│       └── roi_table.pkl        # 完整 ROI 表（含各 yaw 角 IK 解）
-├── urdf/
-│   └── dual_arm_ik_xy_centered.urdf  # 机械臂 URDF（RealCostPlanner 的唯一机械臂定义来源）
-└── dependency/
-    └── tracikpy/                # IK 求解器依赖（用于 build_roi_table.py）
+├── roi/
+│   ├── build_roi_table.py        # 全 ROI 网格建表（并顺便画 dual_arm_roi_coverage.png）
+│   ├── build_points.py           # 手工/中密度/调试点集建表（并顺便画 selected_points_reachability.png）
+│   ├── compute_danger_zone.py    # 危险区计算（并顺便画 danger_zone_envelopes.png）
+│   └── results/
+│       ├── grid/
+│       ├── danger/
+│       └── points/
+├── ompl/
+│   ├── single.py                 # 单点单臂调试
+│   ├── batch.py                  # 批量 per-IK OMPL 规划
+│   ├── point_table.py            # per-IK 结果整理为优化器输入，并自动画图
+│   └── results/
+│       ├── single/
+│       ├── batch/
+│       └── point_table/
+└── urdf/
 ```
+
+---
+
+## 各模块职责
+
+### 1. ROI 模块
+
+#### `roi/build_roi_table.py`
+用于**全 ROI 网格**建表：
+- 输出：`roi/results/grid/roi_table.pkl`
+- 输出：`roi/results/grid/dual_arm_cost.pkl`
+- 输出：`roi/results/grid/dual_arm_roi_coverage.png`
+- 若已存在结果且 `force_regenerate=False`，则直接读取数据并重画图
+
+#### `roi/build_points.py`
+用于**手工点集 / 中密度采样 / 调试点集**建表：
+- 输出：`roi/results/points/roi_table_selected_points.pkl`
+- 输出：`roi/results/points/selected_points_reachability.png`
+- 需要危险区数据：`roi/results/danger/danger_zone_data.npz`
+- 若已存在结果，默认直接读取并重画图
+
+#### `roi/compute_danger_zone.py`
+用于离线计算危险区：
+- 输出：`roi/results/danger/danger_zone_data.npz`
+- 输出：`roi/results/danger/danger_zone_envelopes.png`
+- 若已有数据，则直接读取并重画图
+
+---
+
+### 2. OMPL 模块
+
+#### `ompl/single.py`
+单点、单臂调试脚本。适合检查：
+- 某个点、某只臂的 safe / free 规划是否成功
+- 候选 goal 姿态与最终 best path 的关系
+
+默认输入：
+- `roi/results/points/roi_table_selected_points.pkl`
+- `roi/results/danger/danger_zone_data.npz`
+
+输出到：
+- `ompl/results/single/`
+
+#### `ompl/batch.py`
+批量对所有点、所有臂、所有 IK 解执行 OMPL：
+- 按 `(point, arm, ik_index)` 粒度逐个规划
+- 对同一 `(key, arm)`，只保存**成功且代价最小**的那一个 IK 的图
+
+默认输入：
+- `roi/results/points/roi_table_selected_points.pkl`
+- `roi/results/danger/danger_zone_data.npz`
+
+输出到：
+- `ompl/results/batch/per_ik.pkl`
+- `ompl/results/batch/per_ik.csv`
+- `ompl/results/batch/summary.txt`
+- `ompl/results/batch/figures/`
+
+#### `ompl/point_table.py`
+把 per-IK 结果整理成**优化器直接读取的 point-level 表**，并自动可视化：
+- 输出：`ompl/results/point_table/point_table.pkl`
+- 输出：`ompl/results/point_table/point_table.csv`
+- 输出：`ompl/results/point_table/summary.txt`
+- 输出：`ompl/results/point_table/visualizations/*.png`
+- 若 point table 已存在，则默认直接读取并重画图
+
+---
+
+## Real Cost（point-motion）模式规则
+
+当前 Real Cost 模式已经不再使用旧的 B1-B6 正方形区域逻辑，而改为使用 point-level motion table。
+
+### 点级标签规则
+
+#### `parallel`
+只要某点至少存在一条 **safe** 结果（任一臂），该点就是 `parallel`：
+- 若 L/R 都有 safe：`allowed_arms=[L,R]`
+- 若只有 L 有 safe：`allowed_arms=[L]`, `must_assign_to=L`
+- 若只有 R 有 safe：`allowed_arms=[R]`, `must_assign_to=R`
+
+并且：
+- 优化器**只允许使用 safe 候选**
+- free 候选全部丢弃，不参与优化
+
+#### `serial_upper` / `serial_lower`
+若两臂都没有 safe，但存在 free：
+- 上半区：`serial_upper`
+- 下半区：`serial_lower`
+
+并且：
+- 优化器**只允许使用 free 候选**
+- 若仅一只臂有 free，则 `must_assign_to` 为该臂
+
+#### `discard`
+若两臂既无 safe 也无 free，则丢弃。
+
+---
+
+## Real Cost 模式中的调度约束
+
+- 同一只机械臂上的任务不能重叠
+- 两个 `serial_upper` 任务不能同时执行
+- 两个 `serial_lower` 任务不能同时执行
+- `parallel` 与 `serial_upper/serial_lower` 可以并行，只要满足分配臂约束
+- 不再使用 B1-B6 作为可视化与约束来源
+
+---
+
+## 启发式 warm start（phased heuristic）
+
+当前 point-motion Real Cost 模式使用的启发式规则：
+
+### 左臂顺序
+1. `serial_upper`
+2. 上半 `parallel`
+3. 下半 `parallel`
+4. `serial_lower`
+
+### 右臂顺序
+1. `serial_lower`
+2. 下半 `parallel`
+3. 上半 `parallel`
+4. `serial_upper`
+
+左右臂从 `t=0` 同时开始工作。
+
+---
+
+## 推荐工作流
+
+### A. 全 ROI 网格建表
+```bash
+python roi/build_roi_table.py
+```
+
+### B. 计算危险区
+```bash
+python roi/compute_danger_zone.py
+```
+
+### C. 生成手工/调试点集 ROI 表
+```bash
+python roi/build_points.py   --timeout 0.035   --global-yaw-count 17   --n-global-random-seeds 8   --n-home-perturb-seeds 4   --max-attempts-per-yaw 12   --max-solutions-per-yaw 3   --max-safe-solutions 8
+```
+
+### D. 单点调试
+```bash
+python ompl/single.py --arm L --key 0.000_0.300_0.560 --mode auto
+```
+
+### E. 批量 per-IK OMPL
+```bash
+python ompl/batch.py --mode auto --arms both --solve-time 1.0 --num-trials 5 --planner RRTConnect --save-figures
+```
+
+### F. 生成优化器输入 point table
+```bash
+python ompl/point_table.py
+```
+
+### G. 运行 point-motion Real Cost 模式
+```bash
+python planning/real_cost_example.py
+```
+
+---
+
+## 结果目录说明
+
+### `roi/results/grid/`
+全 ROI 网格建表结果
+
+### `roi/results/danger/`
+危险区数据与图
+
+### `roi/results/points/`
+手工点集 / 中密度点集建表结果
+
+### `ompl/results/single/`
+单点调试结果
+
+### `ompl/results/batch/`
+批量 per-IK 规划结果
+
+### `ompl/results/point_table/`
+点级优化器输入与可视化结果
 
 ---
 
@@ -205,56 +247,3 @@ pip install dependency/tracikpy
 > **注意**：`gurobipy` 需要有效的 Gurobi 许可证（学术版免费申请）。
 
 ---
-
-## 快速开始
-
-### 运行 Baseline 模式
-
-```bash
-cd planning
-python3 baseline.py
-# 结果输出到 planning/results/
-```
-
-### 运行 Real Cost 模式
-
-```bash
-cd planning
-python3 real_cost_example.py
-# 结果输出到 planning/results/real_cost_example1/
-```
-
-### 重新生成 cost table（可选）
-
-如需基于最新 URDF 重新生成 cost table（需要 tracikpy 及 IK 环境）：
-
-```bash
-cd roi
-python3 build_roi_table.py
-# 结果输出到 roi/results/dual_arm_cost.pkl
-```
-
----
-
-## 输出说明
-
-| 文件 | 说明 |
-|------|------|
-| `*_animation.gif` | 双臂采摘执行过程动画 |
-| `*_gantt.png` | 任务调度甘特图 |
-| `comparison_summary.txt` | 启发式 vs MILP 对比摘要 |
-| `task_distribution.png` | 任务空间分布图 |
-| `region_utilization.png` | 区域利用率分析 |
-| `performance_comparison.png` | 性能对比图 |
-| `task_data.csv` | 原始任务数据 |
-| `heuristic_actions.csv` | 启发式调度结果 |
-| `milp_actions.csv` | MILP 优化结果 |
-| `experiment_config.json` | 实验配置快照 |
-
----
-
-## 进阶展望
-
-- **强化学习加速求解**：后续将引入 RL 算法对大规模任务场景进行快速求解，并与 MILP 进行对比。
-- **三维扩展**：目前固定 z=0.56m，后续可扩展为多高度切片或完整三维规划。
-- **在线重规划**：在实际采摘中加入草莓识别、失败重试等在线更新机制。
