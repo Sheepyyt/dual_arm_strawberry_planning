@@ -1,5 +1,4 @@
 import os
-import os
 import pickle
 import xml.etree.ElementTree as ET
 import numpy as np
@@ -496,7 +495,13 @@ def plot_dual_arm_roi(roi_payload, cfg, T_left, T_right):
 # main
 # =========================================================
 def main():
-    if (not CONFIG["force_regenerate"]) and os.path.exists(CONFIG["roi_table_file"]) and os.path.exists(CONFIG["dual_arm_cost_file"]):
+    use_existing = (
+        (not CONFIG["force_regenerate"]) and
+        os.path.exists(CONFIG["roi_table_file"]) and
+        os.path.exists(CONFIG["dual_arm_cost_file"])
+    )
+
+    if use_existing:
         with open(CONFIG["roi_table_file"], "rb") as f:
             roi_payload = pickle.load(f)
 
@@ -506,8 +511,15 @@ def main():
             CONFIG["right_base_joint"],
         )
         print(f"Loaded existing ROI table from {CONFIG['roi_table_file']}", flush=True)
+        print("Reusing existing ROI data and redrawing dual_arm_roi_coverage.png ...", flush=True)
     else:
         roi_payload, left_cost, right_cost, T_left, T_right = generate_dual_arm_roi_table(CONFIG)
+
+    # 无论是新生成还是复用已有结果，都重新绘制 coverage 图。
+    # 这样当 roi_table.pkl / dual_arm_cost.pkl 已存在、但 dual_arm_roi_coverage.png 被删除时，
+    # 再次运行本脚本也能直接补出图。
+    plot_dual_arm_roi(roi_payload, CONFIG, T_left, T_right)
+
 
 if __name__ == "__main__":
     main()
