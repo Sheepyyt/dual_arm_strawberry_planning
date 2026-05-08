@@ -1,9 +1,0 @@
-=== Strawberry Harvesting Optimization Results ===
-
-Heuristic Makespan: 71.38s
-MILP Makespan: 62.21s
-Improvement: 12.8%
-
-Total Tasks: 24
-
-MILP achieved 12.8% improvement!
