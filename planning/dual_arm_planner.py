@@ -142,7 +142,7 @@ class DualArmPlannerCore:
     # 优化入口（共用）
     # ----------------------------------------------------------
     def solve_optimization(self,
-                           time_limit: int = 30,
+                           time_limit: int = 1500,
                            heuristic_name: str = "spatial_order"
                            ) -> Tuple[List[Dict], List[Dict], float]:
         """
@@ -661,7 +661,7 @@ class DualArmPlannerCore:
             plt.show()
 
     # ----------------------------------------------------------
-    # 综合保存结果（是 region/B1-B6 视角，不建议在 point-motion 模式下继续用）
+    # 综合保存结果（共用）
     # ----------------------------------------------------------
     def save_comprehensive_results(self,
                                    result_dir: str = "comprehensive_results",
@@ -1610,6 +1610,160 @@ class RealCostPlanner(DualArmPlannerCore):
 
         return model
 
+
+    # ----------------------------------------------------------
+    # Point-motion 专用 warm start（修复旧版接口不兼容问题）
+    # ----------------------------------------------------------
+    def _set_warm_start(self, model: gp.Model, actions: List[Dict]):
+        """
+        为 point-motion MILP 设置 warm start。
+        修复点：
+        - 不再依赖旧版的 interference_set / regions
+        - 正确设置 serial_upper / serial_lower 的组顺序变量
+        """
+        try:
+            if not hasattr(model, "_varmap") or model._varmap is None:
+                raise RuntimeError("Warm start requires model._varmap.")
+
+            varmap = model._varmap
+            x = varmap["x"]
+            t = varmap["t"]
+            T = varmap["T"]
+            order_vars = varmap.get("order", {})
+            group_order_vars = varmap.get("region_order", {})
+            tasks = self.milp_params["tasks"]
+            allowed_arms = self.milp_params["allowed_arms"]
+
+            x_warm: Dict[Tuple[str, str], int] = {}
+            t_warm: Dict[str, float] = {}
+
+            for tid in tasks:
+                for arm in ["L", "R"]:
+                    if arm in allowed_arms[tid]:
+                        x_warm[(tid, arm)] = 0
+
+            for a in actions:
+                tid = a["task"]
+                arm = a["arm"]
+                x_warm[(tid, arm)] = 1
+                t_warm[tid] = float(a["start"])
+
+            T_warm = float(max(a["end"] for a in actions)) if actions else 0.0
+
+            for (tid, arm), value in x_warm.items():
+                try:
+                    x[tid, arm].Start = int(value)
+                except Exception:
+                    pass
+
+            for tid in tasks:
+                try:
+                    t[tid].Start = float(t_warm.get(tid, 0.0))
+                except Exception:
+                    pass
+
+            try:
+                T.Start = T_warm
+            except Exception:
+                pass
+
+            # 同臂顺序变量
+            for arm in ["L", "R"]:
+                arm_actions = sorted(
+                    [a for a in actions if a["arm"] == arm],
+                    key=lambda z: (float(z["start"]), float(z["end"]))
+                )
+                task_order = [a["task"] for a in arm_actions]
+                rank = {tid: i for i, tid in enumerate(task_order)}
+                for (i, j, a), var in order_vars.items():
+                    if a != arm:
+                        continue
+                    if i in rank and j in rank:
+                        var.Start = 1 if rank[i] < rank[j] else 0
+
+            # serial_upper / serial_lower 组顺序变量
+            for group_name in ["serial_upper", "serial_lower"]:
+                group_actions = sorted(
+                    [a for a in actions if a["label"] == group_name],
+                    key=lambda z: (float(z["start"]), float(z["end"]))
+                )
+                task_order = [a["task"] for a in group_actions]
+                rank = {tid: i for i, tid in enumerate(task_order)}
+                for key_tuple, var in group_order_vars.items():
+                    if len(key_tuple) != 3:
+                        continue
+                    g, i, j = key_tuple
+                    if g != group_name:
+                        continue
+                    if i in rank and j in rank:
+                        var.Start = 1 if rank[i] < rank[j] else 0
+
+            print(f"Warm start values set successfully. Heuristic makespan: {T_warm:.2f}s")
+
+        except Exception as e:
+            print(f"Warning: Could not set point-motion warm start values: {e}")
+
+    # ----------------------------------------------------------
+    # Point-motion 专用求解：MILP 若不优于 heuristic，则回退为 heuristic
+    # ----------------------------------------------------------
+    def solve_optimization(self,
+                           time_limit: int = 1500,
+                           heuristic_name: str = "spatial_order"
+                           ) -> Tuple[List[Dict], List[Dict], float]:
+        if self.task_df is None:
+            raise ValueError("No task data loaded.")
+
+        print(f"Running {heuristic_name} heuristic...")
+        if heuristic_name != "spatial_order":
+            raise ValueError(f"Unknown heuristic: {heuristic_name}")
+
+        self.heuristic_actions = self.spatial_order_heuristic()
+        heuristic_makespan = max(action["end"] for action in self.heuristic_actions) if self.heuristic_actions else 0.0
+        print(f"Heuristic - Makespan: {heuristic_makespan:.2f}s")
+
+        print("Building MILP model...")
+        model = self.build_milp_model(self.heuristic_actions)
+        model.setParam("TimeLimit", time_limit)
+        model.setParam("MIPFocus", 1)
+        model.setParam("OutputFlag", 1)
+
+        print(f"Solving MILP (time limit: {time_limit}s)...")
+        model.optimize()
+
+        self.milp_actions = self.heuristic_actions
+        self.improvement = 0.0
+
+        if model.status in (GRB.OPTIMAL, GRB.TIME_LIMIT) and model.SolCount > 0:
+            x_vals, t_vals = self._extract_solution_vars(model)
+            candidate_actions = self._extract_action_sequence(x_vals, t_vals)
+            candidate_makespan = max(action["end"] for action in candidate_actions) if candidate_actions else heuristic_makespan
+
+            # 关键保护：
+            # point-motion RealCost 模式下，MILP 绝不应比 heuristic 更差；
+            # 若当前求解器返回更差解（常见原因是 warm start 未被采纳或 time limit 下只找到较差 incumbent），
+            # 则直接保留 heuristic 作为最终结果。
+            if candidate_makespan + 1e-9 < heuristic_makespan:
+                self.milp_actions = candidate_actions
+                self.improvement = ((heuristic_makespan - candidate_makespan) / heuristic_makespan) * 100.0
+                print(f"MILP - Makespan: {candidate_makespan:.2f}s")
+                print(f"Improvement: {self.improvement:.1f}%")
+            else:
+                if candidate_makespan > heuristic_makespan + 1e-9:
+                    print(
+                        f"Warning: MILP incumbent ({candidate_makespan:.2f}s) is worse than heuristic "
+                        f"({heuristic_makespan:.2f}s); falling back to heuristic solution."
+                    )
+                else:
+                    print("MILP did not improve over heuristic; keeping heuristic solution.")
+                self.milp_actions = self.heuristic_actions
+                self.improvement = 0.0
+        else:
+            print(f"MILP solve failed with status: {model.status}; using heuristic solution.")
+            self.milp_actions = self.heuristic_actions
+            self.improvement = 0.0
+
+        return self.heuristic_actions, self.milp_actions, self.improvement
+
     # ----------------------------------------------------------
     # 解提取：附加 point-motion 字段
     # ----------------------------------------------------------
@@ -1862,3 +2016,10 @@ class RealCostPlanner(DualArmPlannerCore):
                 f.write(f"Improvement: {self.improvement:.1f}%\n")
 
         print(f"Results saved to {result_dir}/ directory")
+
+
+# ============================================================
+# 向后兼容别名
+# ============================================================
+DualArmPlanner = BaselinePlanner
+PointMotionRealCostPlanner = RealCostPlanner

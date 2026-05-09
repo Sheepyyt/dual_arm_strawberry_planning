@@ -2,13 +2,13 @@
 """
 build_points.py
 
-在 cover_first 版本基础上新增：
-1) 若 roi/results/points/roi_table_selected_points.pkl 已存在，则默认不重复求解，直接读取并重画图
-2) 图中标注每个点左右臂的 safe/fallback 解数量：
-   - 左臂: L s/f
-   - 右臂: R s/f
-3) 保留 --force-regenerate，可强制重新求解
+中等/手工采样点集的 ROI 建表脚本。
+修复点：
+1) danger zone 本身已基于带厚度 capsule 生成，因此 safe 判定时也使用相同 LINK_RADIUS 做厚度一致的检查
+2) 点是否位于 danger 中的判定加入 cell 几何边界容差，避免边界点被乐观判为安全
+3) 若 roi/results/points/roi_table_selected_points.pkl 已存在，默认不重复求解，直接重画图
 """
+
 import os
 import sys
 import math
@@ -31,7 +31,8 @@ from build_roi_table import (
     load_base_transforms_from_urdf,
     pose_xyz_yaw_to_T,
 )
-from compute_danger_zone import URDFArmChain
+from compute_danger_zone import URDFArmChain, LINK_RADIUS
+
 
 def build_parser():
     p = argparse.ArgumentParser()
@@ -48,8 +49,11 @@ def build_parser():
     p.add_argument("--max-solutions-per-yaw", type=int, default=3)
     p.add_argument("--max-safe-solutions", type=int, default=8)
     p.add_argument("--z", type=float, default=0.56)
-    p.add_argument("--x-values", type=str, default="-0.4,-0.3,-0.2,-0.1,0.0,0.1,0.2,0.3,0.4")
-    p.add_argument("--y-values", type=str, default="-0.5,-0.4,-0.3,0.3,0.4,0.5")
+
+    # 中等密度默认点集
+    p.add_argument("--x-values", type=str, default="-0.25,-0.20,-0.15,-0.10,-0.05,0.00,0.05,0.10,0.15,0.20,0.25")
+    p.add_argument("--y-values", type=str, default="-0.45,-0.40,-0.35,-0.30,-0.25,0.25,0.30,0.35,0.40,0.45")
+
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--force-regenerate", action="store_true")
     p.add_argument("--verbose", action="store_true")
@@ -102,20 +106,58 @@ def dedup_solutions(solutions, atol=1e-3):
 
 
 class DangerMask2D:
+    """
+    Occupancy query helper for a 2D boolean danger mask.
+
+    NOTE:
+    - The mask cells already come from thick-link capsule sweeps.
+    - To test whether a thick link of radius LINK_RADIUS intersects the mask,
+      we query the line segment centerline against the mask with query_radius=LINK_RADIUS.
+    - Cell geometry is accounted for conservatively via half cell diagonal.
+    """
     def __init__(self, grid, extent, res):
         self.grid = grid.astype(bool)
         self.x_min, self.x_max, self.y_min, self.y_max = [float(v) for v in extent]
         self.res = float(res)
         self.nx, self.ny = self.grid.shape
+        self.half_cell_diag = 0.5 * np.sqrt(2.0) * self.res
 
-    def point_in_mask(self, x, y):
-        ix = int((x - self.x_min) / self.res)
-        iy = int((y - self.y_min) / self.res)
-        if ix < 0 or ix >= self.nx or iy < 0 or iy >= self.ny:
+    def point_in_mask(self, x, y, margin=0.0):
+        """
+        Conservative point query:
+        True if any occupied cell square overlaps a disk centered at (x,y) with radius=margin.
+        """
+        effective = float(max(0.0, margin)) + self.half_cell_diag
+        ix_c = int((x - self.x_min) / self.res)
+        iy_c = int((y - self.y_min) / self.res)
+        r = int(np.ceil(effective / self.res))
+
+        ix_lo = max(0, ix_c - r)
+        ix_hi = min(self.nx - 1, ix_c + r)
+        iy_lo = max(0, iy_c - r)
+        iy_hi = min(self.ny - 1, iy_c + r)
+
+        if ix_lo > ix_hi or iy_lo > iy_hi:
             return False
-        return bool(self.grid[ix, iy])
 
-    def segment_hits_mask(self, p0, p1, sample_step=None):
+        for ix in range(ix_lo, ix_hi + 1):
+            cx = self.x_min + (ix + 0.5) * self.res
+            dx2 = (cx - x) ** 2
+            if dx2 > effective * effective:
+                continue
+            for iy in range(iy_lo, iy_hi + 1):
+                if not self.grid[ix, iy]:
+                    continue
+                cy = self.y_min + (iy + 0.5) * self.res
+                if dx2 + (cy - y) ** 2 <= effective * effective:
+                    return True
+        return False
+
+    def segment_hits_mask(self, p0, p1, query_radius=0.0, sample_step=None):
+        """
+        Conservative segment-vs-mask query:
+        sample along the centerline and query with disk radius=query_radius.
+        """
         sample_step = sample_step or (0.5 * self.res)
         p0 = np.asarray(p0, dtype=float)
         p1 = np.asarray(p1, dtype=float)
@@ -123,7 +165,7 @@ class DangerMask2D:
         n = max(2, int(np.ceil(d / sample_step)) + 1)
         for t in np.linspace(0.0, 1.0, n):
             p = (1 - t) * p0 + t * p1
-            if self.point_in_mask(float(p[0]), float(p[1])):
+            if self.point_in_mask(float(p[0]), float(p[1]), margin=query_radius):
                 return True
         return False
 
@@ -149,21 +191,26 @@ def choose_half(y):
 
 
 def point_in_corresponding_danger_mask(vehicle_xyz, masks):
+    """
+    Conservative point-in-danger test used only for early branching.
+    Uses half-cell-diagonal margin to avoid boundary misclassification from discretisation.
+    """
     x, y, _ = vehicle_xyz
     half = choose_half(y)
+    point_margin = 0.5 * np.sqrt(2.0) * masks["res"] + 1e-9
     if half == "upper":
         mask = DangerMask2D(masks["grid_I_upper"], masks["extent"], masks["res"])
-        return mask.point_in_mask(x, y), mask
+        return mask.point_in_mask(x, y, margin=point_margin), mask
     elif half == "lower":
         mask = DangerMask2D(masks["grid_I_lower"], masks["extent"], masks["res"])
-        return mask.point_in_mask(x, y), mask
+        return mask.point_in_mask(x, y, margin=point_margin), mask
     return False, None
 
 
-def check_state_valid(chain, mask_obj, q):
+def check_state_valid(chain, mask_obj, q, link_radius=LINK_RADIUS):
     pts = chain.fk_all_frames(q)
     for i in range(len(pts) - 1):
-        if mask_obj is not None and mask_obj.segment_hits_mask(pts[i], pts[i + 1]):
+        if mask_obj is not None and mask_obj.segment_hits_mask(pts[i], pts[i + 1], query_radius=link_radius):
             return False
     return True
 
@@ -258,7 +305,10 @@ def solve_for_arm_point_cover_first(solver, chain, T_vehicle_from_arm, p_vehicle
     def process_yaws(yaw_values, stage_name):
         nonlocal safe_bucket, fallback_bucket, success_yaws
         for yaw in yaw_values:
-            T_target = pose_xyz_yaw_to_T(float(x_l), float(y_l), float(z_l), float(yaw), cfg["ee_target_roll"], cfg["ee_target_pitch"])
+            T_target = pose_xyz_yaw_to_T(
+                float(x_l), float(y_l), float(z_l),
+                float(yaw), cfg["ee_target_roll"], cfg["ee_target_pitch"]
+            )
             sols = try_yaw_with_seed_bank(solver, T_target, seed_bank, cfg, args)
             if args.verbose:
                 print(f"      [{stage_name}] yaw={yaw:.3f} -> {len(sols)} sols", flush=True)
@@ -267,7 +317,7 @@ def solve_for_arm_point_cover_first(solver, chain, T_vehicle_from_arm, p_vehicle
             success_yaws.append(float(yaw))
             for q in sols:
                 meta = {"yaw": float(yaw), "q": q.tolist()}
-                if (not point_in_danger) and safe_mask is not None and check_state_valid(chain, safe_mask, q):
+                if (not point_in_danger) and safe_mask is not None and check_state_valid(chain, safe_mask, q, link_radius=LINK_RADIUS):
                     safe_bucket.append(meta)
                 else:
                     fallback_bucket.append(meta)
@@ -370,28 +420,29 @@ def plot_reachability(roi_payload, out_png, T_left, T_right, masks=None):
         ax.add_patch(veh)
         ax.scatter(T_left[0, 3], T_left[1, 3], c="#819CC4", marker="*", s=160, zorder=5, label="Left arm base")
         ax.scatter(T_right[0, 3], T_right[1, 3], c="#8CC19A", marker="*", s=160, zorder=5, label="Right arm base")
-        
+
         if masks is not None:
             extent = masks["extent"]
             res = masks["res"]
             x_min, _, y_min, _ = extent
-
-            # Upper danger mask
             du_grid = masks["grid_I_upper"]
             ix, iy = np.where(du_grid)
             xs = x_min + (ix + 0.5) * res
             ys = y_min + (iy + 0.5) * res
             ax.scatter(xs, ys, s=2, c="#e8a838", alpha=0.18, zorder=1, label="_nolegend_")
 
-            # Lower danger mask
             dl_grid = masks["grid_I_lower"]
             ix, iy = np.where(dl_grid)
             xs = x_min + (ix + 0.5) * res
             ys = y_min + (iy + 0.5) * res
             ax.scatter(xs, ys, s=2, c="#9b59b6", alpha=0.18, zorder=1, label="_nolegend_")
 
-        for roi, clr in [({"x_min": -0.5, "x_max": 0.5, "y_min": 0.25, "y_max": 0.65}, "dimgray"), ({"x_min": -0.5, "x_max": 0.5, "y_min": -0.65, "y_max": -0.25}, "dimgray")]:
-            ax.add_patch(patches.Rectangle((roi["x_min"], roi["y_min"]), roi["x_max"] - roi["x_min"], roi["y_max"] - roi["y_min"], linewidth=0.8, edgecolor=clr, facecolor="none"))
+        for roi, clr in [({"x_min": -0.5, "x_max": 0.5, "y_min": 0.25, "y_max": 0.65}, "dimgray"),
+                         ({"x_min": -0.5, "x_max": 0.5, "y_min": -0.65, "y_max": -0.25}, "dimgray")]:
+            ax.add_patch(patches.Rectangle((roi["x_min"], roi["y_min"]),
+                                           roi["x_max"] - roi["x_min"],
+                                           roi["y_max"] - roi["y_min"],
+                                           linewidth=0.8, edgecolor=clr, facecolor="none"))
         ax.set_title(title)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
@@ -429,6 +480,7 @@ def plot_reachability(roi_payload, out_png, T_left, T_right, masks=None):
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
     fig.savefig(out_png, dpi=260, bbox_inches="tight")
     print(f"Saved figure to {out_png}", flush=True)
+    plt.close(fig)
 
 
 def summarize(payload):
@@ -481,13 +533,29 @@ def main():
     pts, x_values, y_values = selected_points(args)
     print(f"[info] total selected points = {len(pts)}", flush=True)
 
-    payload = {"meta": {"source": os.path.basename(__file__), "z": float(args.z), "x_values": x_values, "y_values": y_values, "args": vars(args)}, "data": {}}
+    payload = {
+        "meta": {
+            "source": os.path.basename(__file__),
+            "z": float(args.z),
+            "x_values": x_values,
+            "y_values": y_values,
+            "args": vars(args),
+            "safe_check_link_radius": float(LINK_RADIUS),
+            "point_danger_margin": float(0.5 * np.sqrt(2.0) * masks["res"]),
+        },
+        "data": {},
+    }
+
     for idx, p in enumerate(pts, start=1):
         key = create_key(*p)
         print(f"[point {idx}/{len(pts)}] {key}", flush=True)
         left = solve_for_arm_point_cover_first(solver, left_chain, T_left, p, cfg, args, masks, rng)
         right = solve_for_arm_point_cover_first(solver, right_chain, T_right, p, cfg, args, masks, rng)
-        payload["data"][key] = {"vehicle_xyz": [float(p[0]), float(p[1]), float(p[2])], "left": left, "right": right}
+        payload["data"][key] = {
+            "vehicle_xyz": [float(p[0]), float(p[1]), float(p[2])],
+            "left": left,
+            "right": right,
+        }
         if args.verbose:
             print(f"    L: {left['classification']} | mode={left['preferred_mode']} | safe={left['n_safe_goal_solutions']} fallback={left['n_fallback_goal_solutions']} final={left.get('n_goal_solutions', 0)}", flush=True)
             print(f"    R: {right['classification']} | mode={right['preferred_mode']} | safe={right['n_safe_goal_solutions']} fallback={right['n_fallback_goal_solutions']} final={right.get('n_goal_solutions', 0)}", flush=True)

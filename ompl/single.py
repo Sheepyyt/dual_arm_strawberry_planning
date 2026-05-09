@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-single.py — OMPL 单点/单臂调试脚本
-- 默认从 ../roi/results/ 读取 roi_table_selected_points.pkl 和 danger_zone_data.npz
-- mode=auto: 有 safe 解则优先 safe；若点本身在危险区，则直接使用 fallback/free
-- mode=safe: 只使用 safe 解
-- mode=free: 只使用 fallback 解；若没有则退回全部 goal_solutions
-- 可视化新增：
-    1) 所有 candidate goal 的终点姿态 -> 淡灰色骨架
-    2) best path 最终落到的终点姿态 -> 红色高亮骨架
+single.py
+
+单点 / 单臂 OMPL 调试脚本（修复版）。
+关键修复：
+- safe 判定时使用与 danger zone 构建相同的 LINK_RADIUS 进行厚度一致的检查
+- 点本身是否位于 danger 中时加入 cell 几何边界容差
 """
+
 import os
 import sys
 import pickle
@@ -16,6 +15,7 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+
 from ompl import base as ob
 from ompl import geometric as og
 
@@ -29,7 +29,7 @@ if ROI_DIR not in sys.path:
     sys.path.insert(0, ROI_DIR)
 
 from build_roi_table import CONFIG as BASE_CONFIG, load_base_transforms_from_urdf
-from compute_danger_zone import URDFArmChain
+from compute_danger_zone import URDFArmChain, LINK_RADIUS
 
 
 class DangerMask2D:
@@ -38,15 +38,33 @@ class DangerMask2D:
         self.x_min, self.x_max, self.y_min, self.y_max = [float(v) for v in extent]
         self.res = float(res)
         self.nx, self.ny = self.grid.shape
+        self.half_cell_diag = 0.5 * np.sqrt(2.0) * self.res
 
-    def point_in_mask(self, x, y):
-        ix = int((x - self.x_min) / self.res)
-        iy = int((y - self.y_min) / self.res)
-        if ix < 0 or ix >= self.nx or iy < 0 or iy >= self.ny:
+    def point_in_mask(self, x, y, margin=0.0):
+        effective = float(max(0.0, margin)) + self.half_cell_diag
+        ix_c = int((x - self.x_min) / self.res)
+        iy_c = int((y - self.y_min) / self.res)
+        r = int(np.ceil(effective / self.res))
+        ix_lo = max(0, ix_c - r)
+        ix_hi = min(self.nx - 1, ix_c + r)
+        iy_lo = max(0, iy_c - r)
+        iy_hi = min(self.ny - 1, iy_c + r)
+        if ix_lo > ix_hi or iy_lo > iy_hi:
             return False
-        return bool(self.grid[ix, iy])
+        for ix in range(ix_lo, ix_hi + 1):
+            cx = self.x_min + (ix + 0.5) * self.res
+            dx2 = (cx - x) ** 2
+            if dx2 > effective * effective:
+                continue
+            for iy in range(iy_lo, iy_hi + 1):
+                if not self.grid[ix, iy]:
+                    continue
+                cy = self.y_min + (iy + 0.5) * self.res
+                if dx2 + (cy - y) ** 2 <= effective * effective:
+                    return True
+        return False
 
-    def segment_hits_mask(self, p0, p1, sample_step=None):
+    def segment_hits_mask(self, p0, p1, query_radius=0.0, sample_step=None):
         sample_step = sample_step or (0.5 * self.res)
         p0 = np.asarray(p0, dtype=float)
         p1 = np.asarray(p1, dtype=float)
@@ -54,7 +72,7 @@ class DangerMask2D:
         n = max(2, int(np.ceil(d / sample_step)) + 1)
         for t in np.linspace(0.0, 1.0, n):
             p = (1 - t) * p0 + t * p1
-            if self.point_in_mask(float(p[0]), float(p[1])):
+            if self.point_in_mask(float(p[0]), float(p[1]), margin=query_radius):
                 return True
         return False
 
@@ -81,6 +99,7 @@ def load_masks(npz_path):
     return {
         "upper": DangerMask2D(z["grid_I_upper"], extent, res),
         "lower": DangerMask2D(z["grid_I_lower"], extent, res),
+        "res": res,
     }
 
 
@@ -106,10 +125,10 @@ def build_space(joint_limits):
     return space
 
 
-def check_state_valid(chain, mask_obj, q):
+def check_state_valid(chain, mask_obj, q, link_radius=LINK_RADIUS):
     pts = chain.fk_all_frames(q)
     for i in range(len(pts) - 1):
-        if mask_obj is not None and mask_obj.segment_hits_mask(pts[i], pts[i + 1]):
+        if mask_obj is not None and mask_obj.segment_hits_mask(pts[i], pts[i + 1], query_radius=link_radius):
             return False
     return True
 
@@ -126,7 +145,7 @@ class CustomStateValidityChecker(ob.StateValidityChecker):
         if not self.si_.satisfiesBounds(state):
             return False
         q = state_to_q(state, self.dof)
-        return check_state_valid(self.chain, self.mask_obj, q)
+        return check_state_valid(self.chain, self.mask_obj, q, link_radius=LINK_RADIUS)
 
 
 def choose_planner(si, planner_name):
@@ -163,8 +182,7 @@ def plan_one_trial(space, joint_limits, q_home, goals, chain, mask_obj, solve_ti
     ss.setStateValidityChecker(checker)
     si.setStateValidityCheckingResolution(float(resolution))
     ss.setStartState(q_to_state(space, q_home))
-    goal_states_list = [q_to_state(space, qg) for qg in goals]
-    ss.setGoal(MultipleGoalStates(si, goal_states_list))
+    ss.setGoal(MultipleGoalStates(si, [q_to_state(space, qg) for qg in goals]))
     ss.setPlanner(choose_planner(si, planner_name))
     ss.setup()
     solved = ss.solve(float(solve_time))
@@ -194,7 +212,6 @@ def select_goals(arm_data, mode, point_in_danger):
         return safe_goals, "safe"
     if mode == "free":
         return (fallback_goals or all_goals), "free"
-
     if point_in_danger:
         return (fallback_goals or all_goals), "free"
     if safe_goals:
@@ -205,7 +222,7 @@ def select_goals(arm_data, mode, point_in_danger):
 def count_valid_goals(goals, chain, mask_obj):
     valid = []
     for q in goals:
-        if check_state_valid(chain, mask_obj, q):
+        if check_state_valid(chain, mask_obj, q, link_radius=LINK_RADIUS):
             valid.append(q)
     return valid
 
@@ -233,14 +250,17 @@ def plot_result(out_png, key, arm, used_mode, point_xyz, masks_dict, chain, q_pa
         xs = du.x_min + (ix + 0.5) * du.res
         ys = du.y_min + (iy + 0.5) * du.res
         ax.scatter(xs, ys, s=2, c="#e8a838", alpha=0.18, label="danger mask (upper)")
-
         dl = masks_dict["lower"]
         ix, iy = np.where(dl.grid)
         xs = dl.x_min + (ix + 0.5) * dl.res
         ys = dl.y_min + (iy + 0.5) * dl.res
         ax.scatter(xs, ys, s=2, c="#9b59b6", alpha=0.18, label="danger mask (lower)")
 
-    # 2) sampled robot postures along the best path (time progression)
+    if candidate_goals:
+        for qg in candidate_goals:
+            pts = chain.fk_all_frames(qg)
+            ax.plot(pts[:, 0], pts[:, 1], "-", lw=1.0, alpha=0.18, color="gray")
+
     best_goal_q = None
     if q_path is not None and len(q_path) > 0:
         best_goal_q = q_path[-1]
@@ -249,14 +269,13 @@ def plot_result(out_png, key, arm, used_mode, point_xyz, masks_dict, chain, q_pa
         for k, idx in enumerate(idxs):
             pts = chain.fk_all_frames(q_path[idx])
             label = "path snapshots" if k == 0 else None
-            ax.plot(pts[:, 0], pts[:, 1], "-", lw=1.6, alpha=0.9, color=cmap[k], label=label, zorder=2)
-            ax.plot(pts[-1, 0], pts[-1, 1], "o", ms=3.5, color=cmap[k], zorder=2)
+            ax.plot(pts[:, 0], pts[:, 1], "-", lw=1.6, alpha=0.9, color=cmap[k], label=label)
+            ax.plot(pts[-1, 0], pts[-1, 1], "o", ms=3.5, color=cmap[k])
 
-    # 3) highlight final chosen goal pose
     if best_goal_q is not None:
         pts = chain.fk_all_frames(best_goal_q)
-        ax.plot(pts[:, 0], pts[:, 1], "-", lw=2.8, alpha=0.95, color="crimson", label="best final pose", zorder=3)
-        ax.plot(pts[-1, 0], pts[-1, 1], "o", ms=5, color="crimson", zorder=3)
+        ax.plot(pts[:, 0], pts[:, 1], "-", lw=2.8, alpha=0.95, color="crimson", label="best final pose")
+        ax.plot(pts[-1, 0], pts[-1, 1], "o", ms=5, color="crimson")
         goal_idx = nearest_goal_index(best_goal_q, candidate_goals)
         if goal_idx is not None:
             ax.text(pts[-1, 0] + 0.01, pts[-1, 1] + 0.01, f"goal#{goal_idx}", fontsize=8, color="crimson")
@@ -270,7 +289,6 @@ def plot_result(out_png, key, arm, used_mode, point_xyz, masks_dict, chain, q_pa
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right", fontsize=8)
 
-    # joint trajectory plot
     ax2 = axes[1]
     if q_path is not None:
         for j in range(q_path.shape[1]):
@@ -285,25 +303,26 @@ def plot_result(out_png, key, arm, used_mode, point_xyz, masks_dict, chain, q_pa
     fig.tight_layout()
     fig.savefig(out_png, dpi=220, bbox_inches="tight")
     print(f"Saved figure to {out_png}", flush=True)
+    plt.close(fig)
 
 
 def main():
     args = build_parser().parse_args()
     cfg = dict(BASE_CONFIG)
+
     with open(args.roi_pkl, "rb") as f:
         roi = pickle.load(f)
 
     item = roi["data"][args.key]
     point_xyz = item["vehicle_xyz"]
-    half = item.get("half", "upper" if point_xyz[1] >= 0.25 else "lower")
-    point_in_danger = bool(item["left"].get("point_in_danger", False) if args.arm == "L" else item["right"].get("point_in_danger", False))
+    half = "upper" if point_xyz[1] >= 0.25 else "lower"
     arm_key = "left" if args.arm == "L" else "right"
     arm_data = item[arm_key]
+    point_in_danger = bool(arm_data.get("point_in_danger", False))
 
     masks = load_masks(args.danger_npz)
-    vis_mask = masks[half]
-    active_mask = vis_mask if args.mode in ("safe", "auto") else None
     used_goals, used_mode = select_goals(arm_data, args.mode, point_in_danger)
+
     if not used_goals:
         raise RuntimeError(f"No candidate goals for {args.arm} @ {args.key} under mode={args.mode}")
 
@@ -313,7 +332,7 @@ def main():
     q_home = np.asarray(cfg["q_seed"], dtype=float)
     space = build_space(chain.joint_limits)
 
-    planner_mask = active_mask if used_mode == "safe" else None
+    planner_mask = masks[half] if used_mode == "safe" else None
     if used_mode == "safe":
         valid_goals = count_valid_goals(used_goals, chain, planner_mask)
         print(f"[goal filter] total={len(used_goals)} valid_safe={len(valid_goals)} point_in_danger={point_in_danger}", flush=True)
@@ -323,7 +342,7 @@ def main():
 
     if not used_goals:
         print("[result] no valid goal states before planning", flush=True)
-        out_png = os.path.join(OMPL_RESULTS_DIR, f"ompl_test_{args.arm}_{args.key.replace('.', 'p')}_{used_mode}.png")
+        out_png = os.path.join(OMPL_RESULTS_DIR, f"{args.arm}_{args.key.replace('.', 'p')}_{used_mode}.png")
         plot_result(out_png, args.key, args.arm, used_mode, point_xyz, masks, chain, None, T_left, T_right, [])
         return
 
@@ -336,7 +355,7 @@ def main():
         if q_path is not None and (best_cost is None or c < best_cost):
             best_cost, best_path = c, q_path
 
-    out_png = os.path.join(OMPL_RESULTS_DIR, f"ompl_test_{args.arm}_{args.key.replace('.', 'p')}_{used_mode}.png")
+    out_png = os.path.join(OMPL_RESULTS_DIR, f"{args.arm}_{args.key.replace('.', 'p')}_{used_mode}.png")
     plot_result(out_png, args.key, args.arm, used_mode, point_xyz, masks, chain, best_path, T_left, T_right, used_goals)
     if best_path is None:
         print("[result] no path found", flush=True)

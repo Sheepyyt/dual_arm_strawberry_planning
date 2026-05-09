@@ -3,14 +3,15 @@
 batch.py
 
 对 roi_table_selected_points.pkl 中的所有点，按“每个 IK 解单独规划”的方式批量运行 OMPL。
-输出统一写入：
+输出写入：
     ompl/results/batch/
 
-与 v2 的区别：
-- 同一 (key, arm) 下，先跑完所有 IK
-- 只给“成功且 best_cost 最小”的那一个 IK 保存图片
-- 其它成功 IK 不保存图，避免大量重复图片
+修复点：
+- safe 判定时使用与 danger zone 构建一致的 LINK_RADIUS 厚度检查
+- 与 build_points.py 保持同一套 conservative mask 查询逻辑
+- 同一 (key, arm) 下，仅给“成功且 best_cost 最小”的 IK 保存图片
 """
+
 import os
 import sys
 import csv
@@ -36,7 +37,7 @@ if ROI_DIR not in sys.path:
     sys.path.insert(0, ROI_DIR)
 
 from build_roi_table import CONFIG as BASE_CONFIG, load_base_transforms_from_urdf
-from compute_danger_zone import URDFArmChain
+from compute_danger_zone import URDFArmChain, LINK_RADIUS
 
 
 class DangerMask2D:
@@ -45,15 +46,33 @@ class DangerMask2D:
         self.x_min, self.x_max, self.y_min, self.y_max = [float(v) for v in extent]
         self.res = float(res)
         self.nx, self.ny = self.grid.shape
+        self.half_cell_diag = 0.5 * np.sqrt(2.0) * self.res
 
-    def point_in_mask(self, x, y):
-        ix = int((x - self.x_min) / self.res)
-        iy = int((y - self.y_min) / self.res)
-        if ix < 0 or ix >= self.nx or iy < 0 or iy >= self.ny:
+    def point_in_mask(self, x, y, margin=0.0):
+        effective = float(max(0.0, margin)) + self.half_cell_diag
+        ix_c = int((x - self.x_min) / self.res)
+        iy_c = int((y - self.y_min) / self.res)
+        r = int(np.ceil(effective / self.res))
+        ix_lo = max(0, ix_c - r)
+        ix_hi = min(self.nx - 1, ix_c + r)
+        iy_lo = max(0, iy_c - r)
+        iy_hi = min(self.ny - 1, iy_c + r)
+        if ix_lo > ix_hi or iy_lo > iy_hi:
             return False
-        return bool(self.grid[ix, iy])
+        for ix in range(ix_lo, ix_hi + 1):
+            cx = self.x_min + (ix + 0.5) * self.res
+            dx2 = (cx - x) ** 2
+            if dx2 > effective * effective:
+                continue
+            for iy in range(iy_lo, iy_hi + 1):
+                if not self.grid[ix, iy]:
+                    continue
+                cy = self.y_min + (iy + 0.5) * self.res
+                if dx2 + (cy - y) ** 2 <= effective * effective:
+                    return True
+        return False
 
-    def segment_hits_mask(self, p0, p1, sample_step=None):
+    def segment_hits_mask(self, p0, p1, query_radius=0.0, sample_step=None):
         sample_step = sample_step or (0.5 * self.res)
         p0 = np.asarray(p0, dtype=float)
         p1 = np.asarray(p1, dtype=float)
@@ -61,7 +80,7 @@ class DangerMask2D:
         n = max(2, int(np.ceil(d / sample_step)) + 1)
         for t in np.linspace(0.0, 1.0, n):
             p = (1 - t) * p0 + t * p1
-            if self.point_in_mask(float(p[0]), float(p[1])):
+            if self.point_in_mask(float(p[0]), float(p[1]), margin=query_radius):
                 return True
         return False
 
@@ -78,7 +97,7 @@ def build_parser():
     p.add_argument("--resolution", type=float, default=0.01)
     p.add_argument("--planner", choices=["RRTConnect", "RRTstar"], default="RRTConnect")
     p.add_argument("--verbose", action="store_true")
-    p.add_argument("--save-figures", action="store_true", help="为每个 (key, arm) 只保存一张最优成功 IK 的图")
+    p.add_argument("--save-figures", action="store_true", help="为每个 (key, arm) 仅保存一张最优成功 IK 的图")
     return p
 
 
@@ -114,10 +133,10 @@ def build_space(joint_limits):
     return space
 
 
-def check_state_valid(chain, mask_obj, q):
+def check_state_valid(chain, mask_obj, q, link_radius=LINK_RADIUS):
     pts = chain.fk_all_frames(q)
     for i in range(len(pts) - 1):
-        if mask_obj is not None and mask_obj.segment_hits_mask(pts[i], pts[i + 1]):
+        if mask_obj is not None and mask_obj.segment_hits_mask(pts[i], pts[i + 1], query_radius=link_radius):
             return False
     return True
 
@@ -134,7 +153,7 @@ class CustomStateValidityChecker(ob.StateValidityChecker):
         if not self.si_.satisfiesBounds(state):
             return False
         q = state_to_q(state, self.dof)
-        return check_state_valid(self.chain, self.mask_obj, q)
+        return check_state_valid(self.chain, self.mask_obj, q, link_radius=LINK_RADIUS)
 
 
 def choose_planner(si, planner_name):
@@ -278,7 +297,8 @@ def main():
             "planner": args.planner,
             "output_dir": BATCH_OUT_DIR,
             "figure_dir": FIG_DIR if args.save_figures else None,
-            "figure_policy": "best_success_per_(key,arm)",
+            "figure_policy": "one best successful IK per (key, arm)",
+            "safe_check_link_radius": float(LINK_RADIUS),
         },
         "data": defaultdict(dict),
     }
@@ -291,7 +311,7 @@ def main():
     for key in keys:
         item = roi["data"][key]
         point_xyz = item["vehicle_xyz"]
-        half = item.get("half", "upper" if point_xyz[1] >= 0.25 else "lower")
+        half = "upper" if point_xyz[1] >= 0.25 else "lower"
         mask_for_half = masks[half]
 
         for arm in arms:
@@ -303,7 +323,7 @@ def main():
             planner_mask = mask_for_half if used_mode == "safe" else None
             filtered_goals = []
             for q in goal_pool:
-                if planner_mask is None or check_state_valid(chains[arm], planner_mask, q):
+                if planner_mask is None or check_state_valid(chains[arm], planner_mask, q, link_radius=LINK_RADIUS):
                     filtered_goals.append(q)
 
             per_ik_results = []
@@ -378,7 +398,6 @@ def main():
                 if args.verbose:
                     print(f"[{key}] arm={arm} ik={ik_idx} mode={used_mode} success={success} cost={best_cost}", flush=True)
 
-            # only save figure for the single best successful IK under the same (key, arm)
             if args.save_figures and best_success_idx is not None:
                 rec = per_ik_results[best_success_idx]
                 fig_name = f"{key.replace('.', 'p')}_{arm}_ik{best_success_idx}_{used_mode}_BEST.png"
@@ -389,8 +408,6 @@ def main():
                 fig_relpath = os.path.relpath(fig_path, BATCH_OUT_DIR)
                 rec["figure_relpath"] = fig_relpath
                 rec["is_best_success_for_key_arm"] = True
-                # update corresponding summary row
-                # rows for this key-arm are appended consecutively at the end of summary_rows
                 for row in reversed(summary_rows):
                     if row["key"] == key and row["arm"] == arm and row["ik_index"] == best_success_idx:
                         row["figure_relpath"] = fig_relpath
@@ -437,6 +454,7 @@ def main():
         f.write(f"failed plans: {failed_tasks}\n")
         f.write(f"saved figures: {saved_figures}\n")
         f.write("figure policy: one best successful IK per (key, arm)\n")
+        f.write(f"safe_check_link_radius: {LINK_RADIUS}\n")
 
     print(f"Saved pkl to {out_pkl}", flush=True)
     print(f"Saved csv to {out_csv}", flush=True)

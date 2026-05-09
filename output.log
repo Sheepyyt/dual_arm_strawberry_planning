@@ -1,0 +1,211 @@
+nohup: ignoring input
+Dual-Arm Strawberry Harvesting — Point-motion Real Cost Examples
+======================================================================
+=== Point-motion Real Cost Example 1: All non-discard points ===
+
+[RealCostPlanner:point-motion] point table: /home/yyt/dual_arm_strawberry_planning/ompl/results/point_table/point_table.pkl
+[RealCostPlanner:point-motion] URDF: /home/yyt/dual_arm_strawberry_planning/urdf/dual_arm_ik_xy_centered.urdf
+[RealCostPlanner:point-motion] Left  base: [-0.28336 -0.22875]
+[RealCostPlanner:point-motion] Right base: [0.28336 0.22875]
+[RealCostPlanner:point-motion] total points in table: 110
+Loaded 110 optimizer-ready tasks.
+                     key     x     y         label allowed_arms must_assign_to  time_to_L  time_to_R candidate_mode_L candidate_mode_R
+0    -0.050_-0.250_0.560 -0.05 -0.25      parallel       [L, R]           None   1.673088   1.700651             safe             safe
+1    -0.050_-0.300_0.560 -0.05 -0.30  serial_lower       [L, R]           None   2.754285   0.753475             free             free
+2    -0.050_-0.350_0.560 -0.05 -0.35  serial_lower       [L, R]           None   3.939746   0.865851             free             free
+3    -0.050_-0.400_0.560 -0.05 -0.40  serial_lower       [L, R]           None   3.497722   1.136069             free             free
+4    -0.050_-0.450_0.560 -0.05 -0.45  serial_lower       [L, R]           None   4.078677   1.675971             free             free
+5     -0.050_0.250_0.560 -0.05  0.25      parallel       [L, R]           None   3.176469   3.313157             safe             safe
+6     -0.050_0.300_0.560 -0.05  0.30  serial_upper       [L, R]           None   0.279529   3.378167             free             free
+7     -0.050_0.350_0.560 -0.05  0.35  serial_upper       [L, R]           None   0.378618   3.718876             free             free
+8     -0.050_0.400_0.560 -0.05  0.40  serial_upper       [L, R]           None   0.468000   4.156241             free             free
+9     -0.050_0.450_0.560 -0.05  0.45  serial_upper       [L, R]           None   0.660926   4.636188             free             free
+10   -0.100_-0.250_0.560 -0.10 -0.25      parallel       [L, R]           None   2.792071   2.672003             safe             safe
+11   -0.100_-0.300_0.560 -0.10 -0.30  serial_lower       [L, R]           None   2.370305   1.180626             free             free
+12   -0.100_-0.350_0.560 -0.10 -0.35  serial_lower       [L, R]           None   2.931491   1.412462             free             free
+13   -0.100_-0.400_0.560 -0.10 -0.40  serial_lower       [L, R]           None   3.412328   1.945794             free             free
+14   -0.100_-0.450_0.560 -0.10 -0.45  serial_lower       [L, R]           None   3.942010   1.971679             free             free
+15    -0.100_0.250_0.560 -0.10  0.25      parallel       [L, R]           None   3.631567   2.445074             safe             safe
+16    -0.100_0.300_0.560 -0.10  0.30  serial_upper       [L, R]           None   0.275800   2.999881             free             free
+17    -0.100_0.350_0.560 -0.10  0.35  serial_upper       [L, R]           None   0.357195   3.593882             free             free
+18    -0.100_0.400_0.560 -0.10  0.40  serial_upper       [L, R]           None   0.445756   4.394469             free             free
+19    -0.100_0.450_0.560 -0.10  0.45  serial_upper          [L]              L   0.455605        NaN             free             None
+20   -0.150_-0.250_0.560 -0.15 -0.25      parallel       [L, R]           None   3.711236   2.289605             safe             safe
+21   -0.150_-0.300_0.560 -0.15 -0.30  serial_lower       [L, R]           None   2.081184   1.811255             free             free
+22   -0.150_-0.350_0.560 -0.15 -0.35  serial_lower       [L, R]           None   3.572288   2.136351             free             free
+23   -0.150_-0.400_0.560 -0.15 -0.40  serial_lower       [L, R]           None   3.495332   2.666068             free             free
+24   -0.150_-0.450_0.560 -0.15 -0.45      parallel          [L]              L   4.051158        NaN             safe             None
+25    -0.150_0.250_0.560 -0.15  0.25      parallel       [L, R]           None   1.786315   3.102542             safe             safe
+26    -0.150_0.300_0.560 -0.15  0.30  serial_upper       [L, R]           None   0.508383   3.714589             free             free
+27    -0.150_0.350_0.560 -0.15  0.35  serial_upper       [L, R]           None   0.503633   4.637969             free             free
+28    -0.150_0.400_0.560 -0.15  0.40      parallel          [L]              L   2.563361        NaN             safe             None
+29    -0.150_0.450_0.560 -0.15  0.45      parallel          [L]              L   2.476037        NaN             safe             None
+30   -0.200_-0.250_0.560 -0.20 -0.25      parallel       [L, R]           None   3.855489   2.758370             safe             safe
+31   -0.200_-0.300_0.560 -0.20 -0.30  serial_lower       [L, R]           None   2.230400   3.011259             free             free
+32   -0.200_-0.350_0.560 -0.20 -0.35  serial_lower       [L, R]           None   3.841068   3.321891             free             free
+33   -0.200_-0.400_0.560 -0.20 -0.40      parallel          [L]              L   3.968091        NaN             safe             None
+34   -0.200_-0.450_0.560 -0.20 -0.45      parallel          [L]              L   5.684607        NaN             safe             None
+35    -0.200_0.250_0.560 -0.20  0.25      parallel       [L, R]           None   1.910130   4.318560             safe             safe
+36    -0.200_0.300_0.560 -0.20  0.30  serial_upper          [L]              L   0.689294        NaN             free             None
+37    -0.200_0.350_0.560 -0.20  0.35      parallel          [L]              L   1.331997        NaN             safe             None
+38    -0.200_0.400_0.560 -0.20  0.40      parallel          [L]              L   1.241900        NaN             safe             None
+39    -0.200_0.450_0.560 -0.20  0.45      parallel          [L]              L   1.638653        NaN             safe             None
+40   -0.250_-0.250_0.560 -0.25 -0.25      parallel          [L]              L   4.116215        NaN             safe             None
+41   -0.250_-0.300_0.560 -0.25 -0.30      parallel          [L]              L   4.008597        NaN             safe             None
+42   -0.250_-0.350_0.560 -0.25 -0.35      parallel          [L]              L   4.469117        NaN             safe             None
+43   -0.250_-0.400_0.560 -0.25 -0.40      parallel          [L]              L   3.979144        NaN             safe             None
+44   -0.250_-0.450_0.560 -0.25 -0.45      parallel          [L]              L   4.488593        NaN             safe             None
+45    -0.250_0.250_0.560 -0.25  0.25      parallel          [L]              L   1.269331        NaN             safe             None
+46    -0.250_0.300_0.560 -0.25  0.30      parallel          [L]              L   2.207206        NaN             safe             None
+47    -0.250_0.350_0.560 -0.25  0.35      parallel          [L]              L   1.705899        NaN             safe             None
+48    -0.250_0.400_0.560 -0.25  0.40      parallel          [L]              L   2.524763        NaN             safe             None
+49    -0.250_0.450_0.560 -0.25  0.45      parallel          [L]              L   1.159414        NaN             safe             None
+50    0.000_-0.250_0.560  0.00 -0.25      parallel       [L, R]           None   3.191488   4.085261             safe             safe
+51    0.000_-0.300_0.560  0.00 -0.30  serial_lower       [L, R]           None   2.681290   0.496357             free             free
+52    0.000_-0.350_0.560  0.00 -0.35  serial_lower       [L, R]           None   3.301265   0.483086             free             free
+53    0.000_-0.400_0.560  0.00 -0.40  serial_lower       [L, R]           None   4.006370   0.778666             free             free
+54    0.000_-0.450_0.560  0.00 -0.45  serial_lower       [L, R]           None   4.108258   0.842398             free             free
+55     0.000_0.250_0.560  0.00  0.25      parallel       [L, R]           None   4.421331   3.827876             safe             safe
+56     0.000_0.300_0.560  0.00  0.30  serial_upper       [L, R]           None   0.489317   2.620788             free             free
+57     0.000_0.350_0.560  0.00  0.35  serial_upper       [L, R]           None   0.483086   2.868404             free             free
+58     0.000_0.400_0.560  0.00  0.40  serial_upper       [L, R]           None   0.932142   3.539505             free             free
+59     0.000_0.450_0.560  0.00  0.45  serial_upper       [L, R]           None   1.445933   4.255621             free             free
+60    0.050_-0.250_0.560  0.05 -0.25      parallel       [L, R]           None   3.090280   2.753822             safe             safe
+61    0.050_-0.300_0.560  0.05 -0.30  serial_lower       [L, R]           None   2.916076   0.279636             free             free
+62    0.050_-0.350_0.560  0.05 -0.35  serial_lower       [L, R]           None   3.232822   0.378618             free             free
+63    0.050_-0.400_0.560  0.05 -0.40  serial_lower       [L, R]           None   3.896459   0.468000             free             free
+64    0.050_-0.450_0.560  0.05 -0.45  serial_lower       [L, R]           None   4.865617   0.579709             free             free
+65     0.050_0.250_0.560  0.05  0.25      parallel       [L, R]           None   1.700651   3.191904             safe             safe
+66     0.050_0.300_0.560  0.05  0.30  serial_upper       [L, R]           None   0.761588   2.149612             free             free
+67     0.050_0.350_0.560  0.05  0.35  serial_upper       [L, R]           None   0.784211   4.006449             free             free
+68     0.050_0.400_0.560  0.05  0.40  serial_upper       [L, R]           None   1.136069   4.310441             free             free
+69     0.050_0.450_0.560  0.05  0.45  serial_upper       [L, R]           None   1.256151   4.182537             free             free
+70    0.100_-0.250_0.560  0.10 -0.25      parallel       [L, R]           None   2.766032   2.113681             safe             safe
+71    0.100_-0.300_0.560  0.10 -0.30  serial_lower       [L, R]           None   4.076512   0.275800             free             free
+72    0.100_-0.350_0.560  0.10 -0.35  serial_lower       [L, R]           None   4.097104   0.357195             free             free
+73    0.100_-0.400_0.560  0.10 -0.40  serial_lower       [L, R]           None   4.655913   0.439353             free             free
+74    0.100_-0.450_0.560  0.10 -0.45  serial_lower          [R]              R        NaN   0.455605             None             free
+75     0.100_0.250_0.560  0.10  0.25      parallel       [L, R]           None   1.963771   3.074463             safe             safe
+76     0.100_0.300_0.560  0.10  0.30  serial_upper       [L, R]           None   1.183848   2.030733             free             free
+77     0.100_0.350_0.560  0.10  0.35  serial_upper       [L, R]           None   1.412462   2.671377             free             free
+78     0.100_0.400_0.560  0.10  0.40  serial_upper       [L, R]           None   1.969667   3.348856             free             free
+79     0.100_0.450_0.560  0.10  0.45  serial_upper       [L, R]           None   1.891054   4.271684             free             free
+80    0.150_-0.250_0.560  0.15 -0.25      parallel       [L, R]           None   3.291392   3.227368             safe             safe
+81    0.150_-0.300_0.560  0.15 -0.30  serial_lower       [L, R]           None   4.109882   0.498060             free             free
+82    0.150_-0.350_0.560  0.15 -0.35  serial_lower       [L, R]           None   4.689132   0.503633             free             free
+83    0.150_-0.400_0.560  0.15 -0.40      parallel          [R]              R        NaN   1.758670             None             safe
+84    0.150_-0.450_0.560  0.15 -0.45      parallel          [R]              R        NaN   2.479378             None             safe
+85     0.150_0.250_0.560  0.15  0.25      parallel       [L, R]           None   2.289605   3.099676             safe             safe
+86     0.150_0.300_0.560  0.15  0.30  serial_upper       [L, R]           None   1.739124   2.012105             free             free
+87     0.150_0.350_0.560  0.15  0.35  serial_upper       [L, R]           None   2.277733   2.915101             free             free
+88     0.150_0.400_0.560  0.15  0.40  serial_upper       [L, R]           None   2.423599   3.237422             free             free
+89     0.150_0.450_0.560  0.15  0.45  serial_upper          [R]              R        NaN   3.970798             None             free
+90    0.200_-0.250_0.560  0.20 -0.25      parallel       [L, R]           None   4.319571   2.762251             safe             safe
+91    0.200_-0.300_0.560  0.20 -0.30  serial_lower          [R]              R        NaN   0.689294             None             free
+92    0.200_-0.350_0.560  0.20 -0.35      parallel          [R]              R        NaN   1.998283             None             safe
+93    0.200_-0.400_0.560  0.20 -0.40      parallel          [R]              R        NaN   1.335901             None             safe
+94    0.200_-0.450_0.560  0.20 -0.45      parallel          [R]              R        NaN   1.655128             None             safe
+95     0.200_0.250_0.560  0.20  0.25      parallel       [L, R]           None   3.231866   4.050011             safe             safe
+96     0.200_0.300_0.560  0.20  0.30  serial_upper       [L, R]           None   2.988746   2.235116             free             free
+97     0.200_0.350_0.560  0.20  0.35  serial_upper          [R]              R        NaN   3.463156             None             free
+98     0.200_0.400_0.560  0.20  0.40      parallel          [R]              R        NaN   3.913766             None             safe
+99     0.200_0.450_0.560  0.20  0.45      parallel          [R]              R        NaN   4.174959             None             safe
+100   0.250_-0.250_0.560  0.25 -0.25      parallel          [R]              R        NaN   1.269331             None             safe
+101   0.250_-0.300_0.560  0.25 -0.30      parallel          [R]              R        NaN   2.040654             None             safe
+102   0.250_-0.350_0.560  0.25 -0.35      parallel          [R]              R        NaN   2.179572             None             safe
+103   0.250_-0.400_0.560  0.25 -0.40      parallel          [R]              R        NaN   1.652038             None             safe
+104   0.250_-0.450_0.560  0.25 -0.45      parallel          [R]              R        NaN   1.009491             None             safe
+105    0.250_0.250_0.560  0.25  0.25      parallel          [R]              R        NaN   4.286913             None             safe
+106    0.250_0.300_0.560  0.25  0.30      parallel          [R]              R        NaN   3.565360             None             safe
+107    0.250_0.350_0.560  0.25  0.35      parallel          [R]              R        NaN   4.522259             None             safe
+108    0.250_0.400_0.560  0.25  0.40      parallel          [R]              R        NaN   4.317147             None             safe
+109    0.250_0.450_0.560  0.25  0.45      parallel          [R]              R        NaN   3.476102             None             safe
+
+Running optimization...
+Running spatial_order heuristic...
+Heuristic - Makespan: 108.85s
+Building MILP model...
+Set parameter Username
+Set parameter LicenseID to value 2749094
+Academic license - for non-commercial use only - expires 2026-12-03
+Warm start values set successfully. Heuristic makespan: 108.85s
+Set parameter OutputFlag to value 1
+Solving MILP (time limit: 30s)...
+Gurobi Optimizer version 11.0.3 build v11.0.3rc0 (linux64 - "Ubuntu 22.04.5 LTS")
+
+CPU model: Intel(R) Core(TM) i9-14900K, instruction set [SSE2|AVX|AVX2]
+Thread count: 32 physical cores, 32 logical processors, using up to 32 threads
+
+Optimize a model with 30581 rows, 17741 columns and 125569 nonzeros
+Model fingerprint: 0x33cbaa11
+Variable types: 111 continuous, 17630 integer (17630 binary)
+Coefficient statistics:
+  Matrix range     [1e+00, 1e+04]
+  Objective range  [1e+00, 1e+00]
+  Bounds range     [1e+00, 1e+00]
+  RHS range        [1e+00, 3e+04]
+
+User MIP start produced solution with objective 108.846 (0.01s)
+Loaded user MIP start with objective 108.846
+
+Presolve removed 8938 rows and 8856 columns
+Presolve time: 0.04s
+Presolved: 21643 rows, 8885 columns, 99922 nonzeros
+Variable types: 111 continuous, 8774 integer (8774 binary)
+
+Root relaxation: objective 1.017320e+01, 2878 iterations, 0.03 seconds (0.06 work units)
+
+    Nodes    |    Current Node    |     Objective Bounds      |     Work
+ Expl Unexpl |  Obj  Depth IntInf | Incumbent    BestBd   Gap | It/Node Time
+
+     0     0   10.17320    0  229  108.84608   10.17320  90.7%     -    0s
+     0     0   12.59638    0  266  108.84608   12.59638  88.4%     -    1s
+     0     0   12.59638    0  245  108.84608   12.59638  88.4%     -    1s
+     0     0   13.80978    0  244  108.84608   13.80978  87.3%     -    2s
+     0     0   13.80978    0  234  108.84608   13.80978  87.3%     -    2s
+H    0     0                     108.8460807   13.80978  87.3%     -    3s
+     0     0   14.59296    0  249  108.84608   14.59296  86.6%     -    3s
+     0     0   14.59296    0  267  108.84608   14.59296  86.6%     -    4s
+     0     0   14.59296    0  180  108.84608   14.59296  86.6%     -    5s
+     0     0   14.59296    0  198  108.84608   14.59296  86.6%     -    5s
+     0     0   14.59296    0  185  108.84608   14.59296  86.6%     -    6s
+     0     2   14.59296    0  179  108.84608   14.59296  86.6%     -   17s
+H    1     4                     107.1454294   14.59296  86.4%   826   17s
+H    3     8                     107.1454294   14.63016  86.3%   346   18s
+    59    78   16.96747    6  232  107.14543   16.41163  84.7%   415   20s
+   400   405   23.63094   15  204  107.14543   16.50700  84.6%   198   30s
+H  412   405                     106.8366809   16.50700  84.5%   196   30s
+
+Cutting planes:
+  Learned: 6
+  Gomory: 19
+  Implied bound: 6
+  MIR: 504
+  RLT: 11
+  Relax-and-lift: 345
+
+Explored 432 nodes (113298 simplex iterations) in 30.03 seconds (58.33 work units)
+Thread count was 32 (of 32 available processors)
+
+Solution count 5: 106.837 107.145 107.145 ... 108.846
+
+Time limit reached
+Best objective 1.068366809061e+02, best bound 1.650700451433e+01, gap 84.5493%
+MILP - Makespan: 106.84s
+Improvement: 1.8%
+
+Heuristic makespan: 108.85s
+MILP makespan:      106.84s
+Improvement:        1.8%
+Saving animation to /home/yyt/dual_arm_strawberry_planning/planning/results/real_cost_example_all_points/heuristic_animation.gif...
+Animation saved successfully!
+Task map saved to /home/yyt/dual_arm_strawberry_planning/planning/results/real_cost_example_all_points/heuristic_task_map.png
+Gantt chart saved to /home/yyt/dual_arm_strawberry_planning/planning/results/real_cost_example_all_points/heuristic_gantt.png
+Saving animation to /home/yyt/dual_arm_strawberry_planning/planning/results/real_cost_example_all_points/milp_animation.gif...
+Animation saved successfully!
+Task map saved to /home/yyt/dual_arm_strawberry_planning/planning/results/real_cost_example_all_points/milp_task_map.png
+Gantt chart saved to /home/yyt/dual_arm_strawberry_planning/planning/results/real_cost_example_all_points/milp_gantt.png
+Results saved to /home/yyt/dual_arm_strawberry_planning/planning/results/real_cost_example_all_points/ directory
+
+======================================================================
+Done. Check planning/results/ for outputs.
