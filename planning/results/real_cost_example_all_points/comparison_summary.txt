@@ -1,0 +1,9 @@
+=== Point-motion RealCost Optimization Results ===
+
+Point motion table: /home/yyt/dual_arm_strawberry_planning/ompl/results/point_table/point_table.pkl
+Total tasks: 110
+Label counts: {'serial_upper': 45, 'serial_lower': 44, 'parallel': 21}
+
+Heuristic Makespan: 87.05s
+MILP Makespan: 84.36s
+Improvement: 3.1%
