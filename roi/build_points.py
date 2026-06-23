@@ -50,9 +50,13 @@ def build_parser():
     p.add_argument("--max-safe-solutions", type=int, default=8)
     p.add_argument("--z", type=float, default=0.56)
 
-    # 中等密度默认点集
-    p.add_argument("--x-values", type=str, default="-0.25,-0.20,-0.15,-0.10,-0.05,0.00,0.05,0.10,0.15,0.20,0.25")
-    p.add_argument("--y-values", type=str, default="-0.45,-0.40,-0.35,-0.30,-0.25,0.25,0.30,0.35,0.40,0.45")
+    # 中密度默认点集
+    # p.add_argument("--x-values", type=str, default="-0.25,-0.20,-0.15,-0.10,-0.05,0.00,0.05,0.10,0.15,0.20,0.25")
+    # p.add_argument("--y-values", type=str, default="-0.45,-0.40,-0.35,-0.30,-0.25,0.25,0.30,0.35,0.40,0.45")
+
+    # 高密度默认点集
+    p.add_argument("--x-values", type=str, default="-0.50,-0.45,-0.40,-0.35,-0.30,-0.25,-0.20,-0.15,-0.10,-0.05,0.00,0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50")
+    p.add_argument("--y-values", type=str, default="-0.60,-0.55,-0.50,-0.45,-0.40,-0.35,-0.30,0.30,0.35,0.40,0.45,0.50,0.55,0.60")
 
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--force-regenerate", action="store_true")
