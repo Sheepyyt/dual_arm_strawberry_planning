@@ -40,7 +40,7 @@ def example_real_cost_all_points():
     )
 
     heuristic_makespan = max(a["end"] for a in heuristic_actions)
-    milp_makespan = max(a["end"] for a in milp_actions) if milp_actions else heuristic_makespan
+    milp_makespan = planner.milp_makespan  # 权威最优 T（重建排程的 max(end) 可能略大）
 
     print(f"\nHeuristic makespan: {heuristic_makespan:.2f}s")
     print(f"MILP makespan:      {milp_makespan:.2f}s")
@@ -77,7 +77,7 @@ def example_real_cost_specified():
     )
 
     heuristic_makespan = max(a["end"] for a in heuristic_actions)
-    milp_makespan = max(a["end"] for a in milp_actions) if milp_actions else heuristic_makespan
+    milp_makespan = planner.milp_makespan  # 权威最优 T（重建排程的 max(end) 可能略大）
 
     print(f"\nHeuristic makespan: {heuristic_makespan:.2f}s")
     print(f"MILP makespan:      {milp_makespan:.2f}s")

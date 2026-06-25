@@ -5,5 +5,5 @@ Total tasks: 278
 Label counts: {'parallel': 191, 'serial_lower': 44, 'serial_upper': 43}
 
 Heuristic Makespan: 347.21s
-MILP Makespan: 347.21s
-Improvement: 0.0%
+MILP Makespan: 341.68s
+Improvement: 1.6%

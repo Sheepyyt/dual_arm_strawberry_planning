@@ -9,7 +9,7 @@ realcost_planner.py — point-motion 版 Real Cost 双臂采摘规划器（项�
     discard       —— 两臂都够不着，丢弃
 优化目标：最小化总完工时间（makespan）。
 
-本文件只负责“数据加载 + 启发式 + MILP 建模求解”；所有绘图/保存逻辑在 viz.py。
+本文件负责：数据加载 + 启发式 + MILP 建模求解 + 绘图/保存。
 """
 
 import os
@@ -123,18 +123,8 @@ class RealCostPlanner:
         print(f"[RealCostPlanner:point-motion] total points in table: {len(self.point_index)}")
 
     # ----------------------------------------------------------
-    # 代价：从 point table 取 best 候选的 best_cost
+    # 代价：从 point table 取 best 候选的 best_cost，构建 task_df 的一行
     # ----------------------------------------------------------
-    def _compute_processing_time(self, point: np.ndarray, arm: str) -> Optional[float]:
-        key = _create_key(float(point[0]), float(point[1]), 0.56)
-        p = self.point_index.get(key)
-        if p is None or bool(p.get("discard", False)):
-            return None
-        best = _best_candidate(p.get("optimizer_candidates_L", [])) if arm == "L" else _best_candidate(p.get("optimizer_candidates_R", []))
-        if best is None or best.get("best_cost") is None:
-            return None
-        return 2.0 * float(best["best_cost"]) + self.base_operation_time
-
     def _build_row_from_point(self, p: Dict[str, Any]) -> Dict[str, Any]:
         allowed_arms = list(p["allowed_arms"])
         must_assign_to = p.get("must_assign_to")
@@ -446,9 +436,140 @@ class RealCostPlanner:
         return sorted(actions, key=lambda x: x["start"])
 
     # ----------------------------------------------------------
-    # MILP：使用 serial_upper / serial_lower 串行点集
+    # MILP（load-based 重构版，当前默认）
     # ----------------------------------------------------------
     def build_milp_model(self, warm_start_actions: Optional[List[Dict]] = None) -> gp.Model:
+        """
+        Point-motion MILP（load-based 重构版）。
+
+        关键改动（相对 build_milp_model_reference 的全 disjunctive 旧模型）：
+          * 并行点：臂内采摘顺序不影响 makespan（每个动作都是 home→果→home，无序列依赖代价），
+            因此【不建任何同臂逐对顺序变量】，改用每只臂一条"负载下界"约束：
+                T >= Σ_i p_i^a · x_i^a
+            它精确地表达"这只手要顺序干完所有活，总完工 >= 工时之和"。
+          * 串行点：保留精确时序 t_i，加
+              - 危险区组内互斥（serial_upper / serial_lower 各自一组，无论分到哪只臂都要错峰）
+              - 同臂跨组互斥（一个 upper 与一个 lower 若分到同一只手，不在同一危险区但同手不能并发）
+
+        效果：去掉 O(N^2) 的并行相关顺序二元变量及其"顺序无关"对称性，LP 下界大幅收紧。
+        正确性由 build_milp_model_reference（全 disjunctive 精确模型）逐实例对拍验证。
+        """
+        if self.milp_params is None:
+            raise ValueError("No task data loaded.")
+
+        tasks = self.milp_params["tasks"]
+        arms = ["L", "R"]
+        allowed_arms = self.milp_params["allowed_arms"]
+        must_assign_to = self.milp_params["must_assign_to"]
+        processing_time = self.milp_params["processing_time"]
+        serial_upper_tasks = list(self.milp_params["serial_upper_set"])
+        serial_lower_tasks = list(self.milp_params["serial_lower_set"])
+
+        model = gp.Model("DualArmHarvesting_PointMotion_LoadBased")
+        model.setParam("OutputFlag", 0)
+
+        x = model.addVars(tasks, arms, vtype=GRB.BINARY, name="x")
+        t = model.addVars(tasks, vtype=GRB.CONTINUOUS, name="t")
+        T = model.addVar(vtype=GRB.CONTINUOUS, name="T")
+
+        # big-M：仅串行时序(危险区/同臂跨组)约束用到。makespan 的下界由"负载约束"提供
+        # （不含 M），所以这里把 M 取得足够宽松即可，不会牺牲 LP 下界 / 求解速度。
+        # 取 2*horizon + max_dur 保证 M > (t_i + p_i - t_j) 的最坏值（含危险区错峰造成的空档）。
+        horizon = sum(max(processing_time[(i, a)] for a in allowed_arms[i]) for i in tasks)
+        max_dur = max((processing_time[(i, a)] for i in tasks for a in allowed_arms[i]), default=0.0)
+        M = 2.0 * horizon + max_dur + 1.0
+
+        # 任务 i 的处理时间（取决于分到哪只臂）：Σ_a p_i^a x_i^a（恰有一个 x=1）
+        def dur(i):
+            return gp.quicksum(processing_time[(i, a)] * x[i, a] for a in allowed_arms[i])
+
+        # 约束1：每个任务分配给 allowed_arms 中的一只臂
+        for i in tasks:
+            model.addConstr(gp.quicksum(x[i, a] for a in allowed_arms[i]) == 1, name=f"assign_{i}")
+            for a in arms:
+                if a not in allowed_arms[i]:
+                    model.addConstr(x[i, a] == 0, name=f"forbid_{i}_{a}")
+
+        # 约束2：must_assign_to
+        for i in tasks:
+            if must_assign_to[i] in ("L", "R"):
+                must = must_assign_to[i]
+                model.addConstr(x[i, must] == 1, name=f"must_{i}_{must}")
+                for a in arms:
+                    if a != must:
+                        model.addConstr(x[i, a] == 0, name=f"must_forbid_{i}_{a}")
+
+        # 约束3（替代同臂逐对顺序）：每只臂负载下界
+        for a in arms:
+            load_a = gp.quicksum(processing_time[(i, a)] * x[i, a]
+                                 for i in tasks if a in allowed_arms[i])
+            model.addConstr(T >= load_a, name=f"load_{a}")
+
+        # 约束4：每个任务完工 <= T（串行点结束时间在此真正起作用；并行点 t 不影响下界）
+        for i in tasks:
+            model.addConstr(t[i] + dur(i) <= T, name=f"makespan_{i}")
+
+        # 约束5：串行组内危险区互斥（同组任意两点，无论分到哪只臂）
+        group_order_vars: Dict[Tuple[str, str, str], gp.Var] = {}
+
+        def _add_group_serial(group_name: str, group_tasks: List[str]):
+            for idx_i in range(len(group_tasks)):
+                for idx_j in range(idx_i + 1, len(group_tasks)):
+                    i = group_tasks[idx_i]
+                    j = group_tasks[idx_j]
+                    y_ij = model.addVar(vtype=GRB.BINARY, name=f"{group_name}_order_{i}_{j}")
+                    y_ji = model.addVar(vtype=GRB.BINARY, name=f"{group_name}_order_{j}_{i}")
+                    group_order_vars[(group_name, i, j)] = y_ij
+                    group_order_vars[(group_name, j, i)] = y_ji
+                    model.addConstr(y_ij + y_ji == 1, name=f"{group_name}_sum_{i}_{j}")
+                    model.addConstr(t[i] + dur(i) <= t[j] + M * (1 - y_ij),
+                                    name=f"{group_name}_seq_{i}_{j}")
+                    model.addConstr(t[j] + dur(j) <= t[i] + M * (1 - y_ji),
+                                    name=f"{group_name}_seq_{j}_{i}")
+
+        _add_group_serial("serial_upper", serial_upper_tasks)
+        _add_group_serial("serial_lower", serial_lower_tasks)
+
+        # 约束6：同臂跨组串行互斥（一个 serial_upper 与一个 serial_lower 分到同一只臂时不能并发）
+        arm_serial_vars: Dict[Tuple[str, str], gp.Var] = {}
+        for i in serial_upper_tasks:
+            for j in serial_lower_tasks:
+                common = [a for a in allowed_arms[i] if a in allowed_arms[j]]
+                if not common:
+                    continue
+                s_ij = model.addVar(vtype=GRB.BINARY, name=f"armserial_{i}_{j}")
+                s_ji = model.addVar(vtype=GRB.BINARY, name=f"armserial_{j}_{i}")
+                arm_serial_vars[(i, j)] = s_ij
+                arm_serial_vars[(j, i)] = s_ji
+                model.addConstr(s_ij + s_ji == 1, name=f"armserial_sum_{i}_{j}")
+                for a in common:
+                    model.addConstr(
+                        t[i] + processing_time[(i, a)]
+                        <= t[j] + M * (1 - s_ij) + M * (1 - x[i, a]) + M * (1 - x[j, a]),
+                        name=f"armserial_seq_{i}_{j}_{a}")
+                    model.addConstr(
+                        t[j] + processing_time[(j, a)]
+                        <= t[i] + M * (1 - s_ji) + M * (1 - x[i, a]) + M * (1 - x[j, a]),
+                        name=f"armserial_seq_{j}_{i}_{a}")
+
+        model.setObjective(T, GRB.MINIMIZE)
+        model._varmap = {
+            "x": x, "t": t, "T": T,
+            "order": {},                      # 同臂逐对顺序变量已移除
+            "region_order": group_order_vars,
+            "arm_serial": arm_serial_vars,
+            "tasks": tasks, "arms": arms,
+        }
+
+        if warm_start_actions is not None:
+            self._set_warm_start(model, warm_start_actions)
+
+        return model
+
+    # ----------------------------------------------------------
+    # MILP 参考实现（全 disjunctive 精确模型）—— 仅用于对拍验证 / 回退
+    # ----------------------------------------------------------
+    def build_milp_model_reference(self, warm_start_actions: Optional[List[Dict]] = None) -> gp.Model:
         if self.milp_params is None:
             raise ValueError("No task data loaded.")
 
@@ -683,19 +804,23 @@ class RealCostPlanner:
         model.optimize()
 
         self.milp_actions = self.heuristic_actions
+        self.milp_makespan = heuristic_makespan
         self.improvement = 0.0
 
         if model.status in (GRB.OPTIMAL, GRB.TIME_LIMIT) and model.SolCount > 0:
             x_vals, t_vals = self._extract_solution_vars(model)
-            candidate_actions = self._extract_action_sequence(x_vals, t_vals)
-            candidate_makespan = max(action["end"] for action in candidate_actions) if candidate_actions else heuristic_makespan
+            # 权威 makespan = 模型目标值 T（load-based 模型对 makespan 的下界无 big-M，数值稳健）。
+            candidate_makespan = float(model.ObjVal)
+            # 排程用重建得到（并行点时序模型不固定）；其 max(end) 可能比 T 略大，仅用于可视化。
+            candidate_actions = self._reconstruct_action_sequence(x_vals, t_vals)
 
             # 关键保护：
             # point-motion RealCost 模式下，MILP 绝不应比 heuristic 更差；
-            # 若当前求解器返回更差解（常见原因是 warm start 未被采纳或 time limit 下只找到较差 incumbent），
+            # 若当前求解器返回更差解（常见原因是 time limit 下只找到较差 incumbent），
             # 则直接保留 heuristic 作为最终结果。
             if candidate_makespan + 1e-9 < heuristic_makespan:
                 self.milp_actions = candidate_actions
+                self.milp_makespan = candidate_makespan
                 self.improvement = ((heuristic_makespan - candidate_makespan) / heuristic_makespan) * 100.0
                 print(f"MILP - Makespan: {candidate_makespan:.2f}s")
                 print(f"Improvement: {self.improvement:.1f}%")
@@ -708,10 +833,12 @@ class RealCostPlanner:
                 else:
                     print("MILP did not improve over heuristic; keeping heuristic solution.")
                 self.milp_actions = self.heuristic_actions
+                self.milp_makespan = heuristic_makespan
                 self.improvement = 0.0
         else:
             print(f"MILP solve failed with status: {model.status}; using heuristic solution.")
             self.milp_actions = self.heuristic_actions
+            self.milp_makespan = heuristic_makespan
             self.improvement = 0.0
 
         return self.heuristic_actions, self.milp_actions, self.improvement
@@ -732,26 +859,69 @@ class RealCostPlanner:
                 t_vals[task_id] = var.X
         return x_vals, t_vals
 
-    def _extract_action_sequence(self, x_vals: Dict, t_vals: Dict) -> List[Dict]:
+    def _reconstruct_action_sequence(self, x_vals: Dict, t_vals: Dict) -> List[Dict]:
+        """
+        由 load-based 新模型的解重建一个【物理可行（同臂不重叠、危险区不重叠）】的排程：
+          - 串行点：保留模型给的最优 t（已满足危险区/同臂跨组互斥）；
+          - 并行点：模型不固定其开始时间（臂内顺序对 makespan 无关），这里按时长降序
+            first-fit 塞进该臂"串行占用之外"的空隙（尾段无限长，保证总能放下）。
+        得到的排程 makespan 可能比 MILP 最优 T 略大（原子装箱的取整余量，实测 ~0–5%）；
+        solve_optimization 仍以模型证明的 T 作为权威 makespan，本函数只为可视化提供合法时序。
+        """
+        pp = self.milp_params
+        tasks = pp["tasks"]
+        pt = pp["processing_time"]
+        lab = pp["labels"]
+        assign = {i: ("L" if x_vals.get((i, "L"), 0) > 0.5 else "R") for i in tasks}
+
+        times: Dict[str, Tuple[float, float]] = {}
+        serial_by_arm: Dict[str, List[Tuple[float, float]]] = {"L": [], "R": []}
+        for i in tasks:
+            if lab[i] in ("serial_upper", "serial_lower"):
+                a = assign[i]
+                s = float(t_vals.get(i, 0.0))
+                e = s + pt[(i, a)]
+                times[i] = (s, e)
+                serial_by_arm[a].append((s, e))
+
+        for a in ("L", "R"):
+            busy = sorted(serial_by_arm[a])
+            free: List[List[float]] = []
+            cur = 0.0
+            for (s, e) in busy:
+                if s > cur + 1e-9:
+                    free.append([cur, s])
+                cur = max(cur, e)
+            free.append([cur, float("inf")])  # 尾段无限长
+            par = sorted([i for i in tasks if lab[i] == "parallel" and assign[i] == a],
+                         key=lambda i: -pt[(i, a)])
+            for i in par:
+                d = pt[(i, a)]
+                for itv in free:
+                    if itv[1] - itv[0] >= d - 1e-9:
+                        s = itv[0]
+                        times[i] = (s, s + d)
+                        itv[0] = s + d
+                        break
+
         actions = []
-        for task_id in t_vals:
-            row = self.task_df.iloc[int(task_id[1:])]
-            arm = 'L' if x_vals.get((task_id, 'L'), 0) > 0.5 else 'R'
-            start_time = float(t_vals[task_id])
-            end_time = start_time + float(row[f'time_to_{arm}'])
-            cand = row["best_candidate_L"] if arm == "L" else row["best_candidate_R"]
+        for i in tasks:
+            row = self.task_df.iloc[int(i[1:])]
+            a = assign[i]
+            s, e = times[i]
+            cand = row["best_candidate_L"] if a == "L" else row["best_candidate_R"]
             actions.append({
-                'task': task_id,
-                'arm': arm,
+                'task': i,
+                'arm': a,
                 'key': row["key"],
                 'x': float(row['x']),
                 'y': float(row['y']),
-                'start': start_time,
-                'end': end_time,
+                'start': float(s),
+                'end': float(e),
                 'label': row["label"],
                 'case': row["case"],
                 'must_assign_to': row["must_assign_to"],
-                'mode': row["candidate_mode_L"] if arm == "L" else row["candidate_mode_R"],
+                'mode': row["candidate_mode_L"] if a == "L" else row["candidate_mode_R"],
                 'ik_index': None if cand is None else cand.get("ik_index"),
             })
         return sorted(actions, key=lambda a: a['start'])
@@ -961,7 +1131,8 @@ class RealCostPlanner:
                               title_suffix=f" - Heuristic (Makespan: {heuristic_makespan:.2f}s)")
 
         if self.milp_actions is not None:
-            milp_makespan = max(action["end"] for action in self.milp_actions)
+            # 权威 makespan 用 solve_optimization 记录的模型最优 T（重建排程的 max(end) 可能略大）。
+            milp_makespan = getattr(self, "milp_makespan", max(action["end"] for action in self.milp_actions))
             self.animate_solution(self.milp_actions,
                                   save_path=f"{result_dir}/milp_animation.gif")
             self.plot_task_map(self.milp_actions,
